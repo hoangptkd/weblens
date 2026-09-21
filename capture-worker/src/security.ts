@@ -1,5 +1,5 @@
 import { isIP } from 'node:net'
-import { resolve4, resolve6 } from 'node:dns/promises'
+import { lookup } from 'node:dns/promises'
 
 export function isPrivateAddress(address: string): boolean {
   const normalized = address.toLowerCase().split('%')[0] ?? address.toLowerCase()
@@ -38,10 +38,9 @@ export async function assertPublicHttpUrl(rawUrl: string): Promise<URL> {
 export async function resolvePublicAddresses(hostname: string): Promise<string[]> {
   const normalized = hostname.toLowerCase()
   const direct = isIP(normalized)
-  const addresses = direct ? [normalized] : [
-    ...await resolve4(normalized).catch(() => []),
-    ...await resolve6(normalized).catch(() => []),
-  ]
+  const addresses = direct ? [normalized] : await lookup(normalized, { all: true })
+    .then((results) => results.map(({ address }) => address))
+    .catch(() => [])
   if (addresses.length === 0) throw new Error('DNS_FAILED')
   if (addresses.some(isPrivateAddress)) throw new Error('SSRF_BLOCKED')
   return addresses
