@@ -1,7 +1,8 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)][string]$ReleaseZip,
-    [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{7,40}$')][string]$Commit
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-f]{7,40}$')][string]$Commit,
+    [Parameter(Mandatory)][ValidatePattern('^[0-9a-fA-F]{64}$')][string]$ReleaseSha256
 )
 
 $ErrorActionPreference = 'Stop'
@@ -37,21 +38,14 @@ function Wait-Health([string]$Url, [int]$Attempts = 30) {
 
 if (-not $mutex.WaitOne(0)) { throw 'Another WebLens deployment is running' }
 try {
+    $actualReleaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ReleaseZip).Hash
+    if ($actualReleaseHash -ne $ReleaseSha256) { throw 'Release archive checksum failed' }
     $previous = $null
     if (Test-Path -LiteralPath $current) { $previous = (Get-Item -LiteralPath $current).Target }
     if (-not (Test-Path -LiteralPath $release)) {
         New-Item -ItemType Directory -Force -Path $release | Out-Null
         Expand-Archive -LiteralPath $ReleaseZip -DestinationPath $release
     }
-    Push-Location $release
-    try {
-        $checksumFailures = Get-Content -LiteralPath 'SHA256SUMS' | ForEach-Object {
-            $hash, $path = $_ -split '  ', 2
-            if ((Get-FileHash -Algorithm SHA256 -LiteralPath $path).Hash.ToLowerInvariant() -ne $hash) { $path }
-        }
-        if ($checksumFailures) { throw "Release checksum failed: $($checksumFailures -join ', ')" }
-    } finally { Pop-Location }
-
     $stopOrder = @($serviceNames)
     [array]::Reverse($stopOrder)
     foreach ($name in $stopOrder) { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue }

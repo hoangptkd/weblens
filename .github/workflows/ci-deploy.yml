@@ -202,5 +202,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Could not prepare remote release directory' }
           & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME\.ssh\id_ed25519" "artifacts\weblens-${{ github.sha }}-windows-amd64.zip" "${remote}:C:/ProgramData/WebLens/incoming/"
           if ($LASTEXITCODE -ne 0) { throw 'Could not upload release' }
-          & ssh @ssh $remote "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\WebLens\current\infra\production-windows\deploy.ps1 -ReleaseZip C:\ProgramData\WebLens\incoming\weblens-${{ github.sha }}-windows-amd64.zip -Commit ${{ github.sha }}"
+          $release = "artifacts\weblens-${{ github.sha }}-windows-amd64.zip"
+          $releaseSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $release).Hash
+          & ssh @ssh $remote "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\WebLens\current\infra\production-windows\deploy.ps1 -ReleaseZip C:\ProgramData\WebLens\incoming\weblens-${{ github.sha }}-windows-amd64.zip -Commit ${{ github.sha }} -ReleaseSha256 $releaseSha256"
           if ($LASTEXITCODE -ne 0) { throw 'Remote deployment failed' }

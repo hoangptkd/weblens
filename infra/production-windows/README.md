@@ -9,8 +9,8 @@ pointing to the active release. Secrets live only in
 virtual accounts, Administrators, and SYSTEM.
 
 Run `bootstrap.ps1` once after the first release junction exists. Deploy later
-ZIPs with `deploy.ps1 -ReleaseZip <path> -Commit <sha>`. The script verifies all
-checksums, runs only the crawler PostgreSQL migration, health-checks all services,
+ZIPs with `deploy.ps1 -ReleaseZip <path> -Commit <sha> -ReleaseSha256 <sha256>`.
+The script verifies the archive, runs only the crawler PostgreSQL migration, health-checks all services,
 and returns to the previous junction on failure.
 
 Caddy listens on 443 with an internal certificate because the VPS has no WebLens

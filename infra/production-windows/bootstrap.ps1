@@ -2,6 +2,7 @@
 param()
 
 $ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
 $root = 'C:\WebLens'
 $programData = 'C:\ProgramData\WebLens'
 $runtime = Join-Path $root 'runtime'
@@ -41,15 +42,16 @@ foreach ($serviceName in $serviceNames) {
     if (-not (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
         & $wrapper install
         if ($LASTEXITCODE -ne 0) { throw "Could not install $serviceName" }
-        & sc.exe config $serviceName obj= "NT SERVICE\$serviceName" password= ""
-        if ($LASTEXITCODE -ne 0) { throw "Could not assign virtual account to $serviceName" }
     }
+    & sc.exe config $serviceName obj= "NT SERVICE\$serviceName"
+    if ($LASTEXITCODE -ne 0) { throw "Could not assign virtual account to $serviceName" }
 }
 
 & icacls.exe $programData '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'BUILTIN\Administrators:(OI)(CI)F'
 foreach ($serviceName in $serviceNames) {
     & icacls.exe $programData '/grant' "NT SERVICE\${serviceName}:(OI)(CI)RX"
     & icacls.exe (Join-Path $programData 'logs') '/grant' "NT SERVICE\${serviceName}:(OI)(CI)M"
+    & icacls.exe (Join-Path $programData 'weblens.env') '/grant' "NT SERVICE\${serviceName}:R"
 }
 & icacls.exe (Join-Path $programData 'caddy') '/grant' 'NT SERVICE\WebLensCaddy:(OI)(CI)M'
 
