@@ -19,7 +19,13 @@ function Set-CurrentRelease([string]$Target) {
     if (-not $resolvedTarget.StartsWith($resolvedRoot, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'Release target is outside the releases directory'
     }
-    if (Test-Path -LiteralPath $current) { Remove-Item -LiteralPath $current -Force }
+    if (Test-Path -LiteralPath $current) {
+        $currentItem = Get-Item -LiteralPath $current -Force
+        if (-not ($currentItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'Current release path is not a junction'
+        }
+        [IO.Directory]::Delete($current)
+    }
     New-Item -ItemType Junction -Path $current -Target $resolvedTarget | Out-Null
 }
 
