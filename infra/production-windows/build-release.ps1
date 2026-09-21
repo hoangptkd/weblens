@@ -17,6 +17,10 @@ Copy-Item -LiteralPath (Join-Path $repository 'capture-worker\dist') -Destinatio
 Copy-Item -LiteralPath (Join-Path $repository 'capture-worker\migrations') -Destination (Join-Path $staging 'capture-worker\migrations') -Recurse
 Copy-Item -LiteralPath (Join-Path $repository 'capture-worker\node_modules') -Destination (Join-Path $staging 'capture-worker\node_modules') -Recurse
 Copy-Item -LiteralPath (Join-Path $repository 'capture-worker\package.json') -Destination (Join-Path $staging 'capture-worker\package.json')
+$loopbackApi = Get-ChildItem -LiteralPath (Join-Path $repository 'frontend\dist\assets') -Filter '*.js' |
+    Select-String -SimpleMatch 'http://localhost:8080', 'http://127.0.0.1:8080' |
+    Select-Object -First 1
+if ($loopbackApi) { throw 'Frontend production bundle contains a loopback API URL' }
 Copy-Item -Path (Join-Path $repository 'frontend\dist\*') -Destination (Join-Path $staging 'frontend') -Recurse
 Copy-Item -Path (Join-Path $repository 'infra\production-windows\*') -Destination (Join-Path $staging 'infra\production-windows') -Recurse
 

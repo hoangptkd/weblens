@@ -63,7 +63,7 @@ try {
         foreach ($name in $serviceNames) { Start-Service -Name $name }
         Wait-Health 'http://127.0.0.1:8081/health/ready'
         Wait-Health 'http://127.0.0.1:8082/health/ready'
-        Wait-Health 'http://127.0.0.1:8080/actuator/health'
+        Wait-Health 'http://127.0.0.1:8080/actuator/health' 90
         Wait-Health 'https://127.0.0.1/'
     } catch {
         foreach ($name in $stopOrder) { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue }
