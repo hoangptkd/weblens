@@ -1,5 +1,49 @@
 # Development
 
+## Theo dõi render và tra log Design Clone
+
+Trang chi tiết Design Clone có Render Monitor: snapshot mới mỗi 5 giây khi job
+còn chạy, phần trăm ứng viên đã xử lý, phase, page đang render và danh sách có
+lọc/phân trang. `SUCCEEDED` nghĩa là đã tạo bundle ứng viên, không bảo đảm page
+được giữ trong ZIP cuối (còn deduplicate layout khi assembly). URL bị loại có
+trạng thái `CANCELLED` kèm reason code; không tính thành lỗi render.
+
+Chọn **Tra log và thông tin chẩn đoán** để sao chép `siteCloneRequestId`, `scanId`,
+`correlationId`; nút ở từng page thêm `pageId`, `attempt` và mã lỗi. Dùng shell
+trên máy đang chạy Compose, từ thư mục repository:
+
+```powershell
+docker compose -f infra/compose.yml logs --since 1h --tail 10000 capture-worker | Select-String -SimpleMatch '<siteCloneRequestId>'
+```
+
+Production dùng `-f infra/production/compose.yml` và cùng Compose project name
+đã dùng khi deploy. Với Linux:
+
+```sh
+docker compose -f infra/production/compose.yml logs --since 1h --tail 10000 capture-worker | rg -F '<siteCloneRequestId>'
+```
+
+Log JSON mới có sự kiện selection/render/assembly/publish, phase, attempt,
+durationMs khi hoàn tất, mã job/page/scan và correlation. `accepted=false` ở
+page completed nghĩa là bundle không được nhận làm kết quả thành công.
+`retryEligible=true` chỉ là còn retry budget, không bảo đảm đã retry thành công.
+Lease hết hạn cho thấy worker có thể gián đoạn; không tự suy ra job thất bại.
+Tăng cửa sổ `--since`/`--tail` nếu cần; log cũ đã rotate không thể khôi phục từ UI.
+Không dán token, cookie, HTML hay URL chứa thông tin nhạy cảm vào báo cáo lỗi.
+
+API mới: `GET /api/v1/site-clones/{id}/progress?after=-1&limit=50&status=ALL&q=`.
+Control Plane authorize owner trước khi gọi worker. Worker dùng snapshot
+REPEATABLE READ read-only, timeout query 3 giây; cursor là ordinal, không OFFSET.
+Counters toàn job độc lập bộ lọc; rows có thể đổi nhóm giữa hai lần polling nên
+về đầu danh sách để thấy các page vừa chuyển trạng thái. Query aggregate vẫn
+đọc page rows của job (trần 100.000); cần benchmark nhiều người xem đồng thời
+trước khi tuyên bố capacity production. Không có migration hoặc index mới.
+
+Rollout: rebuild/restart Capture Worker, Control Plane và frontend để endpoint
+mới có hiệu lực. Trạng thái của job cũ vẫn xem được từ rows đã lưu; log sự kiện
+mới chỉ có cho công việc chạy sau cập nhật. Không restart giữa render đang chạy
+nếu chưa có cửa sổ bảo trì; worker có lease/retry nhưng có thể phải render lại.
+
 ## Current implementation state
 
 Repository có Control Plane Java 21/Spring Boot, Crawler Go, Playwright Capture
@@ -24,14 +68,13 @@ migration cùng runtime boundary riêng. Không chuyển source AGPL vào `backe
    `docker compose --env-file .env -f infra/compose.yml up -d`.
 3. Từ `backend/`, chạy `.\mvnw.cmd spring-boot:run` bằng Java 21, không chọn profile.
 4. Từ `crawler/`, nạp các biến `CRAWLER_*` rồi chạy `go run ./cmd/weblens-crawler`.
-5. Cấu hình frontend backend mode, chạy `npm ci`, `npm run build`, rồi phục vụ
-   artifact bằng `npm run preview -- --host 127.0.0.1 --port 5173`.
+5. Đặt `VITE_API_BASE_URL` của frontend tới Control Plane, chạy `npm ci`,
+   `npm run build`, rồi phục vụ artifact bằng
+   `npm run preview -- --host 127.0.0.1 --port 5173`.
 
-Frontend mode is selected at build/start time:
-
-- `VITE_API_MODE=mock` (default): complete deterministic UI demo.
-- `VITE_API_MODE=backend`: auth, website, scan, page-report và browser-capture API
-  thật tại `VITE_API_BASE_URL`.
+Frontend chỉ có production API adapter tại `VITE_API_BASE_URL`; không có mock mode
+hoặc environment switch. Website và scan history dùng page-number pagination.
+Page evidence dùng cursor pagination để tránh chi phí offset trên tập kết quả lớn.
 
 Backend không còn profile `dev` hoặc `loadtest`. `application.yml` là cấu hình
 runtime duy nhất và dùng mức 100.000 trang/scan, depth 4, 24 giờ, 10.000 scan
@@ -45,6 +88,11 @@ mặc định 30 giây. Metadata `STAGED` chỉ được chuyển `PUBLISHED` kh
 generation còn hợp lệ. `STAGED` mồ côi có grace period một giờ; archive publish
 giữ 7 ngày rồi được xóa khỏi MinIO. Không giảm chu kỳ GC quá thấp nếu chưa đo tải
 PostgreSQL và object storage.
+
+Site clone dùng cùng chu kỳ GC cho archive shard hết hạn và page bundle tạm sau
+khi job terminal. Budget nằm trong các biến `WEBLENS_SITE_CLONE_*`; concurrency
+Chromium toàn Capture Worker nằm ở `CAPTURE_SITE_CLONE_CONCURRENCY`. Mức mặc định
+là baseline an toàn về cấu trúc, không phải kết quả benchmark capacity.
 
 ## Verification commands
 

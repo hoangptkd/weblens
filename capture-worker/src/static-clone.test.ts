@@ -19,6 +19,7 @@ test('ánh xạ URL thành path portable và chặn traversal/tên dành riêng'
   assert.equal(urlToLocalPath('https://example.com/a%2Fb/app'), 'example.com/a_b/app')
   assert.equal(inferExtension('example.com/assets/site', 'text/css; charset=utf-8'), 'example.com/assets/site.css')
   assert.equal(sanitizePathComponent('hello?.js'), 'hello_.js')
+  assert.equal(sanitizePathComponent('café.html'), 'caf_.html')
 })
 
 test('query variant được tách path collision nhưng không lộ query value khi rewrite', () => {
@@ -42,6 +43,22 @@ test('query variant được tách path collision nhưng không lộ query value
   )
   assert.doesNotMatch(redacted, /external-secret/u)
   assert.match(redacted, /REDACTED/u)
+})
+
+test('content-addressed resources giữ extension và chỉ deduplicate representation tương thích', () => {
+  const resources = [
+    input('https://example.com/shared-a', 'script', 'application/javascript', 'same-body'),
+    input('https://example.com/shared-b', 'script', 'text/javascript', 'same-body'),
+    input('https://example.com/shared-c', 'font', 'font/woff2', 'same-body'),
+    input('https://example.com/styles/app', 'stylesheet', 'text/css', 'body{color:#123}'),
+  ]
+  const plan = planStaticClone('https://example.com/', resources, 20, { contentAddressedResources: true })
+
+  assert.equal(plan.resources[0]?.localPath, plan.resources[1]?.localPath)
+  assert.match(plan.resources[0]?.localPath ?? '', /^assets\/[0-9a-f]{64}\.js$/u)
+  assert.match(plan.resources[2]?.localPath ?? '', /^assets\/[0-9a-f]{64}\.woff2$/u)
+  assert.notEqual(plan.resources[0]?.localPath, plan.resources[2]?.localPath)
+  assert.match(plan.resources[3]?.localPath ?? '', /^assets\/[0-9a-f]{64}\.css$/u)
 })
 
 test('tạo ZIP bounded và manifest trung thực cho partial clone', async () => {

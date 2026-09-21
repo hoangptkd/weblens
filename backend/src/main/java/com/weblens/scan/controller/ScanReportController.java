@@ -4,12 +4,16 @@ import com.weblens.auth.security.AuthenticatedUserId;
 import com.weblens.common.config.OpenApiConfig;
 import com.weblens.scan.dto.ScanPageResponse;
 import com.weblens.scan.dto.ScanPagesResponse;
+import com.weblens.scan.dto.ScanPageFilter;
 import com.weblens.scan.service.ScanReportService;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
@@ -39,9 +43,31 @@ public class ScanReportController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID scanId,
             @RequestParam(defaultValue = "100") @Min(1) @Max(500) int limit,
-            @RequestParam(required = false) String cursor
+            @RequestParam(required = false) String cursor,
+            @RequestParam(defaultValue = "false") boolean issuesOnly,
+            @RequestParam(name = "outcome", required = false) @Size(max = 3)
+            List<@Pattern(regexp = "(?i)success|warning|failed") String> outcomes,
+            @RequestParam(required = false) @Min(0) @Max(599) Integer statusMin,
+            @RequestParam(required = false) @Min(0) @Max(599) Integer statusMax,
+            @RequestParam(required = false) @Size(max = 200) String q,
+            @RequestParam(required = false) Boolean indexable,
+            @RequestParam(name = "contentType", required = false) @Size(max = 10)
+            List<@Size(max = 128) String> contentTypes,
+            @RequestParam(name = "severity", required = false) @Size(max = 4)
+            List<@Pattern(regexp = "(?i)info|warning|error|critical") String> severities,
+            @RequestParam(name = "findingCode", required = false) @Size(max = 20)
+            List<@Pattern(regexp = "[A-Za-z0-9._-]{1,64}") String> findingCodes
     ) {
-        return reports.listPages(AuthenticatedUserId.from(jwt), scanId, limit, cursor);
+        return reports.listPages(
+                AuthenticatedUserId.from(jwt),
+                scanId,
+                limit,
+                cursor,
+                new ScanPageFilter(
+                        issuesOnly, outcomes, statusMin, statusMax, q, indexable,
+                        contentTypes, severities, findingCodes
+                )
+        );
     }
 
     @GetMapping("/scan-pages/{pageId}")

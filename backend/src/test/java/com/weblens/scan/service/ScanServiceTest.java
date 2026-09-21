@@ -8,6 +8,7 @@ import static org.mockito.Mockito.never;
 
 import com.weblens.auth.service.CurrentUserService;
 import com.weblens.common.config.ScanLimitProperties;
+import com.weblens.common.exception.ApiException;
 import com.weblens.common.exception.ConflictException;
 import com.weblens.messaging.ControlMessagingRepository;
 import com.weblens.messaging.contract.MessageEnvelope;
@@ -85,6 +86,27 @@ class ScanServiceTest {
 		ScanRequestedPayload payload = (ScanRequestedPayload) envelope.getValue().payload();
 		assertThat(payload.targetUrl()).isEqualTo("https://example.com/");
 		assertThat(payload.ownerId()).isEqualTo(userId);
+    }
+
+    @Test
+    void rejectsObviouslyNonPublicTargetsBeforePersistingScan() {
+        UUID userId = UUID.randomUUID();
+        for (String hostname : java.util.List.of("localhost", "127.0.0.1", "10.0.0.1", "169.254.169.254")) {
+            UUID websiteId = UUID.randomUUID();
+            given(websiteAccess.lockOwnedActive(userId, websiteId)).willReturn(
+                    new WebsiteAccessService.WebsiteTargetSnapshot(
+                            websiteId, userId, "http://" + hostname + "/", hostname
+                    )
+            );
+
+            assertThatThrownBy(() -> service.create(userId, websiteId, null, UUID.randomUUID()))
+                    .isInstanceOf(ApiException.class)
+                    .extracting("code")
+                    .isEqualTo("UNSAFE_SCAN_TARGET");
+        }
+
+        verify(scans, never()).saveAndFlush(org.mockito.ArgumentMatchers.any());
+        verify(messages, never()).enqueue(org.mockito.ArgumentMatchers.any());
     }
 
     @Test

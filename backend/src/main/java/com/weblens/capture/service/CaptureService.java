@@ -81,6 +81,12 @@ public class CaptureService {
         currentUsers.lockActive(ownerId);
         CrawlerPageContract page = crawler.getPage(ownerId, pageId);
         scans.findByIdAndRequestedByUserId(page.scanId(), ownerId).orElseThrow(CaptureService::notFound);
+        if (!"success".equalsIgnoreCase(page.outcome())) {
+            throw new ConflictException(
+                    "PAGE_NOT_CAPTURE_ELIGIBLE",
+                    "Only successfully crawled pages can be captured."
+            );
+        }
 
         String keyHash = idempotencyKeys.hashOptional(rawIdempotencyKey);
         String fingerprint = keyHash == null ? null : idempotencyKeys.fingerprint(OPERATION, pageId.toString());

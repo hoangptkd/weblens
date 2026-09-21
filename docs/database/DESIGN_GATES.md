@@ -87,6 +87,13 @@ Với YELLOW, phải ghi nhận phê duyệt theo từng bảng, revision của 
 quyết định đã chốt về vòng đời/quyền sở hữu. Phê duyệt một bảng không đồng nghĩa
 với phê duyệt cả chín bảng hoặc các bảng RED phụ thuộc.
 
+Ngày 2026-09-18, người dùng phê duyệt riêng proposal revision 2 cho full-site
+clone và yêu cầu triển khai. Phê duyệt này chỉ bao gồm `site_clone_requests`,
+revision site `reconstruction_jobs`/`reconstruction_artifacts`, page-work relation,
+command inbox và event outbox được mô tả trong
+`RECONSTRUCTION_SITE_CLONE_PROPOSAL.md`. Nó không hạ mức hoặc mở quyền thiết kế
+cho bất kỳ bảng RED/YELLOW nào khác.
+
 ## Sản phẩm bàn giao
 
 - GREEN: thiết kế hiện tại, bằng chứng triển khai, kiểm thử và giới hạn vận hành.

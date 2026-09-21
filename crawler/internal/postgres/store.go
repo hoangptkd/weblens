@@ -746,7 +746,7 @@ func (s *Store) CommitPageResult(ctx context.Context, lease model.PageLease, res
 		RequestedURL: lease.NormalizedURL, NormalizedURL: lease.NormalizedURL,
 		FinalURL: result.FinalURL, Hostname: lease.Hostname,
 		DiscoveryDepth: uint16(lease.DiscoveryDepth), Result: result,
-		CollectorVersion: lease.CollectorVersion, ParserVersion: "weblens-parser-v2",
+		CollectorVersion: lease.CollectorVersion, ParserVersion: "weblens-parser-v3",
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

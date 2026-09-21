@@ -13,6 +13,13 @@ import (
 	"github.com/weblens-project/weblens-crawler/internal/model"
 )
 
+func TestSecureConnectionRequiresHostAndPort(t *testing.T) {
+	_, err := openConnection(Options{Address: "clickhouse.example", Database: "analytics", Secure: true}, "analytics")
+	if err == nil {
+		t.Fatal("secure address without a port was accepted")
+	}
+}
+
 func TestDecodeAnalyticsBatchAcceptsJSONBNormalizedPayload(t *testing.T) {
 	batch := analyticsBatchFixture(t)
 	var normalized map[string]any

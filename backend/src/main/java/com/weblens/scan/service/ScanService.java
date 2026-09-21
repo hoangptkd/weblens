@@ -18,15 +18,20 @@ import com.weblens.scan.model.ScanConfiguration;
 import com.weblens.scan.model.ScanNotCancellableException;
 import com.weblens.scan.model.ScanStatus;
 import com.weblens.scan.repository.ScanRepository;
+import com.weblens.website.model.WebsiteTarget;
 import com.weblens.website.service.WebsiteAccessService;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.EnumSet;
+import jakarta.persistence.criteria.Predicate;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -77,6 +82,7 @@ public class ScanService {
     ) {
         currentUsers.lockActive(userId);
         WebsiteAccessService.WebsiteTargetSnapshot website = websiteAccess.lockOwnedActive(userId, websiteId);
+        requirePublicTarget(website.hostname());
 
         String keyHash = idempotencyKeys.hashOptional(rawIdempotencyKey);
         String fingerprint = keyHash == null
@@ -136,16 +142,76 @@ public class ScanService {
         return new CreateScanResult(toResponse(scan), false);
     }
 
-    public PageResponse<ScanResponse> list(UUID userId, UUID websiteId, int page, int size) {
+    public PageResponse<ScanResponse> list(
+            UUID userId,
+            UUID websiteId,
+            int page,
+            int size,
+            ListFilter filter
+    ) {
         currentUsers.requireActive(userId);
         websiteAccess.requireOwnedActive(userId, websiteId);
+        validateRange(filter.createdFrom(), filter.createdTo());
         PageRequest pageable = PageRequest.of(
                 page,
                 boundedSize(size),
-                Sort.by(Sort.Direction.DESC, "createdAt").and(Sort.by(Sort.Direction.DESC, "id"))
+                parseListSort(filter.sort())
         );
-        Page<ScanEntity> result = scans.findAllByWebsiteIdAndRequestedByUserId(websiteId, userId, pageable);
+        Page<ScanEntity> result = scans.findAll(filter(userId, websiteId, filter), pageable);
         return PageResponse.from(result.map(this::toResponse));
+    }
+
+    private Specification<ScanEntity> filter(UUID userId, UUID websiteId, ListFilter filter) {
+        return (root, query, criteria) -> {
+            List<Predicate> predicates = new ArrayList<>();
+            predicates.add(criteria.equal(root.get("requestedByUserId"), userId));
+            predicates.add(criteria.equal(root.get("websiteId"), websiteId));
+            if (!filter.statuses().isEmpty()) predicates.add(root.get("status").in(filter.statuses()));
+            if (filter.createdFrom() != null) predicates.add(criteria.greaterThanOrEqualTo(root.get("createdAt"), filter.createdFrom()));
+            if (filter.createdTo() != null) predicates.add(criteria.lessThanOrEqualTo(root.get("createdAt"), filter.createdTo()));
+            if (filter.terminalCode() != null && !filter.terminalCode().isBlank()) {
+                predicates.add(criteria.equal(root.get("terminalCode"), filter.terminalCode().strip()));
+            }
+            if (filter.minFailedPages() != null) {
+                predicates.add(criteria.greaterThanOrEqualTo(root.get("failedCount"), filter.minFailedPages()));
+            }
+            return criteria.and(predicates.toArray(Predicate[]::new));
+        };
+    }
+
+    private Sort parseListSort(String rawSort) {
+        String[] parts = (rawSort == null ? "createdAt,desc" : rawSort.strip()).split(",", -1);
+        if (parts.length != 2 || !List.of("createdAt", "updatedAt", "status", "failedPages").contains(parts[0])) {
+            throw invalidListSort();
+        }
+        Sort.Direction direction;
+        try {
+            direction = Sort.Direction.fromString(parts[1]);
+        } catch (IllegalArgumentException exception) {
+            throw invalidListSort();
+        }
+        String property = "failedPages".equals(parts[0]) ? "failedCount" : parts[0];
+        return Sort.by(direction, property).and(Sort.by(direction, "id"));
+    }
+
+    private static void validateRange(Instant from, Instant to) {
+        if (from != null && to != null && from.isAfter(to)) {
+            throw new com.weblens.common.exception.ApiException(
+                    org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "INVALID_DATE_RANGE",
+                    "Invalid date range",
+                    "The start date must be before or equal to the end date."
+            );
+        }
+    }
+
+    private static com.weblens.common.exception.ApiException invalidListSort() {
+        return new com.weblens.common.exception.ApiException(
+                org.springframework.http.HttpStatus.BAD_REQUEST,
+                "INVALID_SORT",
+                "Invalid sort",
+                "Sort must use createdAt, updatedAt, status, or failedPages with asc or desc."
+        );
     }
 
     public ScanResponse get(UUID userId, UUID scanId) {
@@ -172,6 +238,32 @@ public class ScanService {
             return new CancelScanResult(toResponse(scan), newlyAccepted);
         } catch (ScanNotCancellableException exception) {
             throw new ConflictException("SCAN_NOT_CANCELLABLE", exception.getMessage());
+        }
+    }
+
+    /**
+     * Cancels the source scan for a site-clone while preserving the global lock
+     * order: scan row first, site-clone row second. A terminal scan is a normal
+     * race here because its event may already be waiting to dispatch the clone.
+     */
+    @Transactional
+    public void cancelForSiteClone(UUID userId, UUID scanId, UUID correlationId) {
+        currentUsers.requireActive(userId);
+        ScanEntity scan = scans.findByIdAndRequestedByUserIdForUpdate(scanId, userId)
+                .orElseThrow(ScanService::notFound);
+        try {
+            Instant now = clock.instant();
+            if (scan.requestCancellation(now)) {
+                scans.saveAndFlush(scan);
+                messages.enqueue(new MessageEnvelope<>(
+                        UUID.randomUUID(), "SCAN", scan.getId(), scan.getVersion(),
+                        "SCAN_CANCEL_REQUESTED", 1, correlationId, now,
+                        new ScanCancelPayload(scan.getId(), userId, now)
+                ));
+            }
+        } catch (ScanNotCancellableException ignored) {
+            // The scan event path will lock the site-clone row next. The caller
+            // continues with that same order and cancels the resulting clone.
         }
     }
 
@@ -215,7 +307,6 @@ public class ScanService {
                         scan.getConcurrency()
                 ),
                 scan.getCollectorVersion(),
-                0,
                 terminalReason
         );
     }
@@ -255,9 +346,33 @@ public class ScanService {
         return new NotFoundException("SCAN_NOT_FOUND", "The scan does not exist.");
     }
 
+    private static void requirePublicTarget(String hostname) {
+        if (WebsiteTarget.isObviouslyNonPublicHostname(hostname)) {
+            throw new com.weblens.common.exception.ApiException(
+                    org.springframework.http.HttpStatus.BAD_REQUEST,
+                    "UNSAFE_SCAN_TARGET",
+                    "Unsafe scan target",
+                    "The website target must use a public network address."
+            );
+        }
+    }
+
     public record CreateScanResult(ScanResponse response, boolean replayed) {
     }
 
     public record CancelScanResult(ScanResponse response, boolean newlyAccepted) {
+    }
+
+    public record ListFilter(
+            List<ScanStatus> statuses,
+            Instant createdFrom,
+            Instant createdTo,
+            String terminalCode,
+            Integer minFailedPages,
+            String sort
+    ) {
+        public ListFilter {
+            statuses = statuses == null ? List.of() : List.copyOf(statuses);
+        }
     }
 }

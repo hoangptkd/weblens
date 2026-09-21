@@ -12,6 +12,7 @@ import com.weblens.scan.model.RemoteScanProjection;
 import com.weblens.scan.model.ScanProgress;
 import com.weblens.scan.model.ScanStatus;
 import com.weblens.scan.repository.ScanRepository;
+import com.weblens.siteclone.service.SiteCloneScanCoordinator;
 import java.security.MessageDigest;
 import java.time.Clock;
 import java.time.Instant;
@@ -28,17 +29,20 @@ public class ScanEventService {
     private final ControlMessagingRepository messages;
     private final ObjectMapper objectMapper;
     private final Clock clock;
+    private final SiteCloneScanCoordinator siteCloneCoordinator;
 
     public ScanEventService(
             ScanRepository scans,
             ControlMessagingRepository messages,
             ObjectMapper objectMapper,
-            Clock clock
+            Clock clock,
+            SiteCloneScanCoordinator siteCloneCoordinator
     ) {
         this.scans = scans;
         this.messages = messages;
         this.objectMapper = objectMapper;
         this.clock = clock;
+        this.siteCloneCoordinator = siteCloneCoordinator;
     }
 
     @Transactional
@@ -94,6 +98,9 @@ public class ScanEventService {
             throw invalidEvent("The scan event cannot be applied to the current projection.", exception);
         }
         String outcome = applied ? "APPLIED" : "IGNORED_STALE";
+        if (applied) {
+            siteCloneCoordinator.onScanProjectionApplied(scan, envelope.correlationId(), now);
+        }
         messages.insertInbox(envelope, payloadHash, outcome, now);
         return new ConsumeResult(false, outcome);
     }

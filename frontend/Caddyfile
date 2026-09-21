@@ -1,0 +1,36 @@
+{
+	email {$ACME_EMAIL}
+	admin off
+}
+
+:8080 {
+	respond /healthz "ok" 200
+}
+
+{$WEBLENS_SITE_ADDRESS} {
+	encode zstd gzip
+
+	log {
+		output stdout
+		format json
+	}
+
+	@api path /api/*
+	handle @api {
+		reverse_proxy backend:8080
+	}
+
+	handle {
+		root * /srv
+		try_files {path} /index.html
+		file_server
+	}
+
+	header {
+		-Server
+		X-Content-Type-Options "nosniff"
+		X-Frame-Options "DENY"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		Permissions-Policy "camera=(), microphone=(), geolocation=()"
+	}
+}

@@ -38,8 +38,8 @@ func TestClickHouseBatchIntegration(t *testing.T) {
 
 	ownerID, scanID := uuid.New(), uuid.New()
 	batches := []model.AnalyticsBatch{
-		newAnalyticsBatch(t, ownerID, scanID, "https://example.com/"),
-		newAnalyticsBatch(t, ownerID, scanID, "https://example.com/about"),
+		newAnalyticsBatch(t, ownerID, scanID, "https://example.com/", "INFO"),
+		newAnalyticsBatch(t, ownerID, scanID, "https://example.com/about", "WARNING"),
 	}
 	for batchID, writeErr := range sink.WriteBatch(ctx, batches) {
 		if writeErr != nil {
@@ -65,7 +65,7 @@ func TestClickHouseBatchIntegration(t *testing.T) {
 	if receipts != 2 {
 		t.Fatalf("expected 2 receipts after replay, got %d", receipts)
 	}
-	pages, hasMore, err := sink.ListPages(ctx, ownerID, scanID, 100, "", uuid.Nil)
+	pages, hasMore, err := sink.ListPages(ctx, ownerID, scanID, 100, "", uuid.Nil, model.PageFilters{})
 	if err != nil {
 		t.Fatalf("list ClickHouse page report: %v", err)
 	}
@@ -74,6 +74,20 @@ func TestClickHouseBatchIntegration(t *testing.T) {
 	}
 	if hasMore {
 		t.Fatal("did not expect another page of integration results")
+	}
+	summary, err := sink.ScanSummary(ctx, ownerID, scanID)
+	if err != nil {
+		t.Fatalf("get ClickHouse scan summary: %v", err)
+	}
+	if summary.TotalURLCount != 2 || summary.IssuePageCount != 1 || summary.FindingCount != 2 || summary.Status2xxCount != 2 {
+		t.Fatalf("unexpected scan summary: %#v", summary)
+	}
+	issuePages, issueHasMore, err := sink.ListPages(ctx, ownerID, scanID, 100, "", uuid.Nil, model.PageFilters{IssuesOnly: true})
+	if err != nil {
+		t.Fatalf("list ClickHouse issue pages: %v", err)
+	}
+	if len(issuePages) != 1 || issueHasMore {
+		t.Fatalf("unexpected issue page result: count=%d hasMore=%v", len(issuePages), issueHasMore)
 	}
 	page, err := sink.GetPage(ctx, ownerID, batches[0].PageID)
 	if err != nil {
@@ -84,7 +98,7 @@ func TestClickHouseBatchIntegration(t *testing.T) {
 	}
 }
 
-func newAnalyticsBatch(t *testing.T, ownerID, scanID uuid.UUID, pageURL string) model.AnalyticsBatch {
+func newAnalyticsBatch(t *testing.T, ownerID, scanID uuid.UUID, pageURL, severity string) model.AnalyticsBatch {
 	t.Helper()
 	pageID, batchID := uuid.New(), uuid.New()
 	now := time.Now().UTC()
@@ -101,7 +115,7 @@ func newAnalyticsBatch(t *testing.T, ownerID, scanID uuid.UUID, pageURL string) 
 			Findings: []model.Finding{{
 				FindingID: uuid.NewSHA1(pageID, []byte("title.integration:1")),
 				RuleID:    "title.integration", RuleVersion: 1, Category: "CONTENT",
-				Severity: "INFO", Code: "INTEGRATION", Message: "Integration finding.",
+				Severity: severity, Code: "INTEGRATION", Message: "Integration finding.",
 				Evidence: map[string]any{"source": "integration-test"},
 			}},
 			Links: []model.DiscoveredLink{{

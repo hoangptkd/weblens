@@ -12,6 +12,7 @@ import org.springframework.validation.annotation.Validated;
 @ConfigurationProperties("weblens.capture")
 public record CaptureProperties(
         @NotNull URI commandUrl,
+        @NotNull URI siteCloneCommandUrl,
         @NotNull URI reportBaseUrl,
         @NotBlank @Size(min = 32, max = 512) String serviceToken,
         @NotNull Duration connectTimeout,
@@ -20,6 +21,7 @@ public record CaptureProperties(
 ) {
     public CaptureProperties {
         requireHttpUrl(commandUrl, "commandUrl");
+        requireHttpUrl(siteCloneCommandUrl, "siteCloneCommandUrl");
         requireHttpUrl(reportBaseUrl, "reportBaseUrl");
         requireRange(connectTimeout, Duration.ofMillis(100), Duration.ofSeconds(30), "connectTimeout");
         requireRange(readTimeout, Duration.ofMillis(100), Duration.ofMinutes(1), "readTimeout");

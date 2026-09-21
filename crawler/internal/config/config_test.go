@@ -77,6 +77,20 @@ func TestLoadRejectsInvalidSecurityBoolean(t *testing.T) {
 	}
 }
 
+func TestLoadEnablesSecureClickHouse(t *testing.T) {
+	t.Setenv("CRAWLER_POSTGRES_URL", "postgres://crawler:password@localhost/crawler")
+	t.Setenv("CRAWLER_SERVICE_TOKEN", strings.Repeat("x", 32))
+	t.Setenv("CRAWLER_CLICKHOUSE_SECURE", "true")
+
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load returned an error: %v", err)
+	}
+	if !cfg.ClickHouseSecure {
+		t.Fatal("secure ClickHouse was not enabled")
+	}
+}
+
 func validConfig() Config {
 	return Config{
 		PostgresURL:         "postgres://crawler:password@localhost/crawler",

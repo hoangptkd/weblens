@@ -15,6 +15,8 @@ import com.weblens.scan.dto.HttpTimingResponse;
 import com.weblens.scan.dto.OpenGraphResponse;
 import com.weblens.scan.dto.ScanPageResponse;
 import com.weblens.scan.dto.ScanPagesResponse;
+import com.weblens.scan.dto.ScanPageFilter;
+import com.weblens.scan.dto.ScanReportSummaryResponse;
 import com.weblens.scan.dto.StructuredDataSummaryResponse;
 import com.weblens.scan.repository.ScanRepository;
 import java.net.URI;
@@ -48,18 +50,37 @@ public class ScanReportService {
         this.objectMapper = objectMapper;
     }
 
-    public ScanPagesResponse listPages(UUID userId, UUID scanId, int limit, String cursor) {
+    public ScanPagesResponse listPages(UUID userId, UUID scanId, int limit, String cursor, ScanPageFilter filter) {
         currentUsers.requireActive(userId);
         scans.findByIdAndRequestedByUserId(scanId, userId)
                 .orElseThrow(ScanReportService::notFound);
+        if (filter.statusMin() != null && filter.statusMax() != null
+                && filter.statusMin() > filter.statusMax()) {
+            throw new ApiException(
+                    HttpStatus.BAD_REQUEST,
+                    "INVALID_STATUS_RANGE",
+                    "Invalid status range",
+                    "statusMin must be less than or equal to statusMax."
+            );
+        }
         try {
-            CrawlerScanPagesContract report = crawler.listPages(userId, scanId, limit, cursor);
-            if (report == null || report.state() == null || report.items() == null) {
+            CrawlerScanPagesContract report = crawler.listPages(userId, scanId, limit, cursor, filter);
+            if (report == null || report.state() == null || report.summary() == null || report.items() == null) {
                 throw unavailable(null);
             }
             boolean fresh = report.state().analyticsExpectedCount() == report.state().analyticsPublishedCount();
             return new ScanPagesResponse(
                     report.items().stream().map(this::toResponse).toList(),
+                    new ScanReportSummaryResponse(
+                            report.summary().totalUrlCount(),
+                            report.summary().issuePageCount(),
+                            report.summary().findingCount(),
+                            report.summary().status2xxCount(),
+                            report.summary().status3xxCount(),
+                            report.summary().status4xxCount(),
+                            report.summary().status5xxCount(),
+                            report.summary().noResponseCount()
+                    ),
                     report.state().analyticsExpectedCount(),
                     report.state().analyticsPublishedCount(),
                     report.state().analyticsWatermark(),

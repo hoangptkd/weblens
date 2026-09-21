@@ -17,6 +17,7 @@ ClickHouse. Đây là phần AGPL của WebLens; xem `NOTICE.md` và `LICENSE`.
 
 - `CRAWLER_POSTGRES_URL`
 - `CRAWLER_CLICKHOUSE_ADDR`
+- `CRAWLER_CLICKHOUSE_SECURE`: `true` cho TLS của ClickHouse Cloud; mặc định `false` ở local.
 - `CRAWLER_SERVICE_TOKEN`: ít nhất 32 byte, dùng chung với Control Plane local.
 - `CRAWLER_CONTROL_EVENTS_URL`
 
@@ -41,6 +42,8 @@ thời mọi public/private target và không phụ thuộc biến môi trườn
 
 `CRAWLER_MIGRATE_ON_START=true` chỉ dành cho local/CI. Production dùng migration
 job với owner role riêng rồi chạy service bằng runtime role không có quyền DDL.
+Binary hỗ trợ `migrate`, `migrate-postgres` và `migrate-clickhouse`; production
+cloud dùng lệnh riêng để runtime role không cần quyền DDL ClickHouse.
 
 ## Chạy local
 

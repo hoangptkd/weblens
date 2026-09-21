@@ -49,7 +49,9 @@ public class ScanWebsiteLookup implements WebsiteScanLookup {
                 scan.getId(),
                 scan.getStatus().name(),
                 scan.getCreatedAt(),
-                scan.getFinishedAt()
+                scan.getFinishedAt(),
+                scan.progress().processed(),
+                scan.progress().failed()
         );
     }
 }

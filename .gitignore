@@ -43,5 +43,11 @@ pagesource_evomi/
 # Local document review workspace
 .codex-docx-review/
 
+# Local cloud credentials
+clickhouse-api-key-weblens.txt
+dogfood-output/
+artifacts/
+crawler/weblens-crawler.exe
+
 # Locally installed agent skills are development-machine tooling
 .agents/skills/

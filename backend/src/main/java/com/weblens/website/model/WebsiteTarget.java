@@ -1,8 +1,10 @@
 package com.weblens.website.model;
 
 import java.net.IDN;
+import java.net.InetAddress;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.net.UnknownHostException;
 import java.util.Locale;
 
 public record WebsiteTarget(String canonicalUrl, String hostname) {
@@ -24,7 +26,7 @@ public record WebsiteTarget(String canonicalUrl, String hostname) {
             HostAndPort hostAndPort = hostAndPort(parsed);
             String asciiHost = IDN.toASCII(hostAndPort.host(), IDN.USE_STD3_ASCII_RULES)
                     .toLowerCase(Locale.ROOT);
-            if (asciiHost.isBlank()) {
+            if (asciiHost.isBlank() || isObviouslyNonPublicHostname(asciiHost)) {
                 throw invalid();
             }
             int canonicalPort = isDefaultPort(scheme, hostAndPort.port()) ? -1 : hostAndPort.port();
@@ -75,6 +77,27 @@ public record WebsiteTarget(String canonicalUrl, String hostname) {
 
     private static boolean isDefaultPort(String scheme, int port) {
         return ("http".equals(scheme) && port == 80) || ("https".equals(scheme) && port == 443);
+    }
+
+    public static boolean isObviouslyNonPublicHostname(String hostname) {
+        String normalized = hostname.endsWith(".") ? hostname.substring(0, hostname.length() - 1) : hostname;
+        if ("localhost".equals(normalized) || normalized.endsWith(".localhost")) {
+            return true;
+        }
+        if (normalized.isBlank()
+                || !normalized.chars().allMatch(character -> Character.isDigit(character) || character == '.')) {
+            return false;
+        }
+        try {
+            InetAddress address = InetAddress.getByName(normalized);
+            return address.isAnyLocalAddress()
+                    || address.isLoopbackAddress()
+                    || address.isLinkLocalAddress()
+                    || address.isSiteLocalAddress()
+                    || address.isMulticastAddress();
+        } catch (UnknownHostException exception) {
+            return false;
+        }
     }
 
     private static InvalidWebsiteTargetException invalid() {

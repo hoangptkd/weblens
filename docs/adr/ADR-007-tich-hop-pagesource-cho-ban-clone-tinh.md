@@ -1,7 +1,88 @@
 # ADR-007 — Tích hợp Pagesource để tạo bản clone tĩnh từ browser capture
 
-Trạng thái: Accepted — người dùng phê duyệt ngày 2026-09-13
+Trạng thái: Accepted revision 1 ngày 2026-09-13; revision 2 và baseline workload,
+database/runtime được người dùng chấp thuận triển khai ngày 2026-09-18; revision 3
+Design Clone được chấp thuận qua TASK-018 ngày 2026-09-20.
 Ngày: 2026-09-13
+
+## Amendment revision 3 — Design Clone
+
+Site-wide workflow của revision 2 mặc định tạo **Design Clone**, không còn cố
+đóng gói mọi URL. Crawler vẫn sở hữu discovery; Capture Worker sở hữu pre-filter,
+semantic classifier, route template, browser render, DOM layout fingerprint và
+representative assembly.
+
+- Chỉ giữ locale của root URL. Alternate locale, query/tracking variant,
+  canonical duplicate, non-HTML và policy-blocked URL không chạy Chromium.
+- Không gộp semantic role khác nhau. Auth login/register/forgot-password,
+  blog index/detail, use-case index/detail và error layout là các nhóm độc lập.
+- Trong cùng role + route template, metadata tĩnh chọn số ứng viên tối thiểu cần
+  render; assembly giữ một representative cho mỗi layout fingerprint khác nhau.
+- Manifest version 2 giải thích counts, reason code, representative, route map,
+  fingerprint version và SHA-256/byte count của từng shard.
+- Design Clone không tạo screenshot. `STATIC_PAGE_ARCHIVE` của capture độc lập
+  không đổi.
+- Page-work row hiện có lưu cả selected và policy-rejected URL; không thêm migration
+  hoặc thay đổi schema. Policy rejection không tự làm archive thành `PARTIAL`.
+- Page bundle chỉ được GC sau terminal publish. Shard/manifest upload qua prefix
+  `site-clone-staging/`, được copy sang key publish và staging prefix có lifecycle
+  dự phòng một ngày.
+
+Quyết định này giữ nguyên ba deployable và public API của revision 2. Đây là bản
+trích giao diện đại diện để chỉnh sửa, không phải backup nội dung, backend, dữ liệu
+hay session của website nguồn.
+
+## Amendment revision 2 — clone toàn website
+
+Ngày 2026-09-18, người dùng yêu cầu mở rộng Pagesource adapter từ clone tĩnh một
+trang sang clone toàn bộ website. Revision này chấp thuận hướng sản phẩm, boundary
+kiến trúc và sau lần review tiếp theo đã chấp thuận baseline trong
+`RECONSTRUCTION_SITE_CLONE_PROPOSAL.md` revision 2. Lịch sử revision 1 bên dưới
+được giữ nguyên để giải thích implementation.
+
+### Quyết định kiến trúc bổ sung
+
+- Giữ `STATIC_PAGE_ARCHIVE` hiện tại để capture một trang tiếp tục tương thích.
+- Bổ sung use case độc lập `STATIC_SITE_ARCHIVE`: người dùng nhập URL gốc và hệ
+  thống tự khởi tạo một scan mới trước khi tạo archive. Người dùng không phải chọn
+  `scan_id`; Capture Worker không tự crawl link graph thay Crawler.
+- Control Plane validate/normalize URL, resolve website theo owner, tạo scan mới
+  và liên kết site-clone với `scan_id` nội bộ bất biến. Không tái sử dụng ngầm
+  latest scan vì dữ liệu có thể cũ. Crawler tiếp tục là nguồn danh sách page đã
+  khám phá; page target được bàn giao bằng contract versioned, phân trang/batch và
+  idempotent, không truyền một payload chứa hàng chục nghìn URL.
+- Capture Worker tiếp tục là execution boundary duy nhất cho Chromium và
+  Pagesource TypeScript engine. Không thêm Python runtime hoặc deployable thứ tư.
+- Mỗi page được browser-render độc lập với lease, timeout và retry hữu hạn. Job có
+  thể resume sau restart; worker cũ không được publish sau khi mất lease.
+- Asset đủ policy được deduplicate xuyên page theo source identity và content hash.
+  HTML/CSS cùng internal link được rewrite sang cây path ổn định trong archive.
+- Site archive là snapshot best-effort theo thời gian, không phải transaction nhất
+  quán của website. Manifest phải ghi thời điểm từng page, page thất bại, asset
+  thiếu/truncate, redirect và mức đầy đủ của toàn job.
+- Mặc định vẫn same-origin, không dùng cookie người dùng, không lưu XHR/fetch body,
+  không `bypass_csp`, không bật download và không chạy archive trên origin WebLens.
+- ZIP và manifest vẫn nằm trong MinIO/S3; PostgreSQL chỉ sở hữu workflow và object
+  metadata. ClickHouse không trở thành queue hoặc nơi lưu payload clone.
+- Job `PARTIAL` vẫn cho tải archive khi có ít nhất một page hợp lệ; `FAILED` không
+  được làm mất scan hoặc capture evidence đã có.
+- Full-site clone phải có progress, cancellation, bounded resource policy và
+  owner-scoped download. Mọi giới hạn phải cấu hình được nhưng vẫn có hard ceiling.
+
+### Cổng triển khai revision 2
+
+Full-site clone cần durable page work, fan-out, retry, lease/fencing và counters.
+Đây là workload nhạy cảm concurrency; không thể biểu diễn production-ready chỉ
+bằng hai bảng revision 1 đang gắn một reconstruction với một `capture_job_id`.
+
+- `reconstruction_jobs` và `reconstruction_artifacts` là YELLOW; revision schema
+  đã được review và phê duyệt riêng cho TASK-015.
+- Durable page-work relation có semantics queue/lease/retry nên được xử lý như RED;
+  đủ 13 bước thiết kế đã được phê duyệt trong proposal revision 2.
+- Không được sửa migration 002/003 đã áp dụng. Mọi thay đổi phải là forward
+  migration sau review theo `RECONSTRUCTION_SITE_CLONE_PROPOSAL.md`.
+- Runtime site-clone, API và UI được phép triển khai theo đúng hard ceiling đã ghi;
+  thay đổi ceiling/schema tiếp theo phải review lại.
 
 ## Bối cảnh
 
@@ -66,9 +147,9 @@ Chọn phương án 3, với các giới hạn sau:
 - Lỗi clone không được làm mất screenshot, rendered evidence hoặc analytical
   result hợp lệ. UI phải thể hiện clone `PARTIAL`/`FAILED` độc lập với capture.
 
-Phạm vi này chưa bao gồm clone toàn bộ các trang của một website. Site-wide clone
-cần fan-out từ scan, cross-page resource dedup, URL graph rewrite, budget và
-retention lớn hơn; nó phải có workload/design review riêng.
+Trong revision 1, phạm vi chưa bao gồm clone toàn bộ các trang của một website.
+Revision 2 phía trên đã chấp thuận hướng mở rộng này nhưng vẫn yêu cầu workload và
+database design review trước implementation.
 
 ## Hệ quả
 
@@ -98,7 +179,6 @@ Người dùng đã phê duyệt đồng thời ngày 2026-09-13:
 
 ## Khi nào xem xét lại
 
-- Người dùng cần clone toàn bộ website thay vì một trang.
 - Archive generation trở thành bottleneck theo benchmark.
 - Cần preview tương tác hoặc chạy JavaScript đã clone.
 - Cần capture response nhạy cảm, authenticated session hoặc API body.

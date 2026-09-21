@@ -11,17 +11,20 @@ import {
   Gauge,
   LoaderCircle,
   RefreshCw,
+  Search,
   ServerCog,
   ShieldCheck,
   XCircle,
 } from 'lucide-react'
-import { useEffect, useMemo, useState } from 'react'
+import { useMemo, useState } from 'react'
+import type { FormEvent } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ApiError } from '../api/apiClient'
-import { isBackendMode, webLensService } from '../api/serviceMode'
+import { webLensService } from '../api/webLensApiService'
+import { CursorPagination } from '../components/Pagination'
 import { ErrorState, LoadingState } from '../components/StateView'
 import { SeverityBadge, StatusBadge } from '../components/StatusBadge'
-import type { Scan, ScanPageRecord, ScanStatus } from '../domain/types'
+import type { ScanPageRecord, ScanStatus } from '../domain/types'
 import { useAsyncData } from '../hooks/useAsyncData'
 
 type ScanTab = 'overview' | 'pages' | 'issues'
@@ -32,33 +35,6 @@ const emptyScanPages: ScanPageRecord[] = []
 
 function isTerminal(status: ScanStatus) {
   return terminalStatuses.has(status)
-}
-
-function useLiveDemo(scan: Scan | null, enabled: boolean) {
-  const [override, setOverride] = useState<{ scanId: string; processed: number; status: ScanStatus } | null>(null)
-  const activeOverride = override?.scanId === scan?.id ? override : null
-  const processed = activeOverride?.processed ?? scan?.progress.processed ?? 0
-  const status = activeOverride?.status ?? scan?.status ?? 'QUEUED'
-
-  useEffect(() => {
-    if (!scan || !enabled || scan.status !== 'RUNNING') return
-    const timer = window.setInterval(() => setOverride((current) => {
-      const currentProcessed = current?.scanId === scan.id ? current.processed : scan.progress.processed
-      const next = Math.min(currentProcessed + 1, scan.progress.discovered)
-      const nextStatus = next === scan.progress.discovered ? 'PARTIAL_SUCCESS' : 'RUNNING'
-      if (nextStatus === 'PARTIAL_SUCCESS') window.clearInterval(timer)
-      return { scanId: scan.id, processed: next, status: nextStatus }
-    }), 1800)
-    return () => window.clearInterval(timer)
-  }, [enabled, scan])
-
-  return {
-    processed,
-    status,
-    setStatus: (nextStatus: ScanStatus) => {
-      if (scan && enabled) setOverride({ scanId: scan.id, processed, status: nextStatus })
-    },
-  }
 }
 
 function statusCopy(status: ScanStatus) {
@@ -89,8 +65,12 @@ function formatBytes(bytes?: number) {
 
 function outcomeLabel(outcome: ScanPageRecord['outcome']) {
   if (outcome === 'success') return 'Thành công'
-  if (outcome === 'warning') return 'Cảnh báo'
+  if (outcome === 'warning') return 'Bỏ qua'
   return 'Thất bại'
+}
+
+function hasActionableIssue(page: ScanPageRecord) {
+  return page.outcome === 'failed' || page.findings.some((finding) => finding.severity !== 'info')
 }
 
 function ScanPagesTable({ pages }: { pages: ScanPageRecord[] }) {
@@ -113,7 +93,7 @@ function ScanPagesTable({ pages }: { pages: ScanPageRecord[] }) {
             <th scope="col">HTTP</th>
             <th scope="col">Kết quả</th>
             <th scope="col">Phản hồi</th>
-            <th scope="col">Findings</th>
+            <th scope="col">Kết quả kiểm tra</th>
             <th scope="col"><span className="sr-only">Mở trang</span></th>
           </tr>
         </thead>
@@ -143,45 +123,71 @@ export function ScanPage() {
   const { scanId = '' } = useParams()
   const [tab, setTab] = useState<ScanTab>('overview')
   const [cancelling, setCancelling] = useState(false)
-  const [cancelAccepted, setCancelAccepted] = useState(false)
+  const [commandState, setCommandState] = useState<{ scanId: string; status: ScanStatus } | null>(null)
   const [cancelError, setCancelError] = useState<string | null>(null)
+  const [pageFilter, setPageFilter] = useState({ q: '', outcome: 'all', http: 'all', indexable: 'all' })
+  const issuesOnly = tab === 'issues'
+  const statusRange = pageFilter.http === 'none'
+    ? { statusMin: 0, statusMax: 199 }
+    : pageFilter.http === 'all'
+      ? {}
+      : { statusMin: Number(pageFilter.http[0]) * 100, statusMax: Number(pageFilter.http[0]) * 100 + 99 }
+  const activeFilters = {
+    issuesOnly,
+    outcomes: pageFilter.outcome === 'all' ? undefined : [pageFilter.outcome as 'success' | 'warning' | 'failed'],
+    q: pageFilter.q || undefined,
+    indexable: pageFilter.indexable === 'all' ? undefined : pageFilter.indexable === 'yes',
+    ...statusRange,
+  }
+  const filterKey = JSON.stringify(activeFilters)
+  const [cursorState, setCursorState] = useState<{
+    scanId: string
+    filterKey: string
+    history: Array<string | undefined>
+    pageIndex: number
+  }>({ scanId, filterKey, history: [undefined], pageIndex: 0 })
+  const activeCursorState = cursorState.scanId === scanId && cursorState.filterKey === filterKey
+    ? cursorState
+    : { scanId, filterKey, history: [undefined], pageIndex: 0 }
+  const { history: cursorHistory, pageIndex } = activeCursorState
+  const currentCursor = cursorHistory[pageIndex]
+
   const scanState = useAsyncData(() => webLensService.getScan(scanId), `scan:${scanId}`, {
-    pollIntervalMs: isBackendMode ? 2000 : undefined,
+    pollIntervalMs: 2000,
     shouldPoll: (scan) => !isTerminal(scan.status),
     shouldPollOnError: () => false,
   })
-  const live = useLiveDemo(scanState.data, !isBackendMode)
-  const displayedStatus: ScanStatus = cancelAccepted && !isTerminal(live.status) ? 'CANCEL_REQUESTED' : live.status
+  const sourceStatus = scanState.data?.status ?? 'QUEUED'
+  const commandStatus = commandState?.scanId === scanId ? commandState.status : null
+  const displayedStatus: ScanStatus = isTerminal(sourceStatus) ? sourceStatus : commandStatus ?? sourceStatus
   const active = !isTerminal(displayedStatus)
-  const pagesState = useAsyncData(() => webLensService.listScanPages(scanId), `scan-pages:${scanId}`, {
-    pollIntervalMs: isBackendMode ? 2500 : undefined,
+  const pagesState = useAsyncData(
+    () => webLensService.listScanPages(scanId, currentCursor, 100, activeFilters),
+    `scan-pages:${scanId}:${filterKey}:${currentCursor ?? 'first'}`,
+    {
+    pollIntervalMs: 2500,
     shouldPoll: () => active,
     shouldPollOnError: () => active,
-  })
+    },
+  )
 
   const report = pagesState.data
   const allPages = report?.items ?? emptyScanPages
-  const issuePages = useMemo(() => allPages.filter((page) => page.findings.length > 0 || page.outcome !== 'success'), [allPages])
-  const totalFindings = useMemo(() => allPages.reduce((total, page) => total + page.findings.length, 0), [allPages])
+  const issuePages = useMemo(
+    () => allPages.filter(hasActionableIssue),
+    [allPages],
+  )
+  const totalUrlCount = report?.summary.totalUrlCount ?? 0
+  const issuePageCount = report?.summary.issuePageCount ?? 0
+  const totalFindings = report?.summary.findingCount ?? 0
   const firstIssuePage = issuePages[0]
-  const httpBuckets = useMemo(() => {
-    const buckets = [
-      { label: '2xx', count: 0, tone: 'success' },
-      { label: '3xx', count: 0, tone: 'redirect' },
-      { label: '4xx', count: 0, tone: 'warning' },
-      { label: '5xx', count: 0, tone: 'danger' },
-      { label: 'Không phản hồi', count: 0, tone: 'muted' },
-    ]
-    for (const page of allPages) {
-      if (page.statusCode === undefined) buckets[4].count += 1
-      else if (page.statusCode >= 500) buckets[3].count += 1
-      else if (page.statusCode >= 400) buckets[2].count += 1
-      else if (page.statusCode >= 300) buckets[1].count += 1
-      else if (page.statusCode >= 200) buckets[0].count += 1
-      else buckets[4].count += 1
-    }
-    return buckets
-  }, [allPages])
+  const httpBuckets = [
+    { label: '2xx', count: report?.summary.status2xxCount ?? 0, tone: 'success' },
+    { label: '3xx', count: report?.summary.status3xxCount ?? 0, tone: 'redirect' },
+    { label: '4xx', count: report?.summary.status4xxCount ?? 0, tone: 'warning' },
+    { label: '5xx', count: report?.summary.status5xxCount ?? 0, tone: 'danger' },
+    { label: 'Không phản hồi', count: report?.summary.noResponseCount ?? 0, tone: 'muted' },
+  ]
 
   if (scanState.loading) return <div className="app-page"><LoadingState label="Đang tải lần quét…" /></div>
   if (!scanState.data) {
@@ -190,11 +196,7 @@ export function ScanPage() {
 
   const scan = scanState.data
   const copy = statusCopy(displayedStatus)
-  const percent = Math.min(100, Math.round((live.processed / Math.max(scan.progress.discovered, 1)) * 100))
-  const displayedSucceeded = Math.min(
-    scan.progress.succeeded + Math.max(live.processed - scan.progress.processed, 0),
-    live.processed,
-  )
+  const percent = Math.min(100, Math.round((scan.progress.processed / Math.max(scan.progress.discovered, 1)) * 100))
   const analyticsExpected = report?.analyticsExpectedCount ?? 0
   const analyticsPublished = report?.analyticsPublishedCount ?? 0
   const analyticsReady = Boolean(report?.fresh && (analyticsExpected > 0 || isTerminal(displayedStatus)))
@@ -205,7 +207,7 @@ export function ScanPage() {
     { label: 'Yêu cầu được lưu', detail: scan.createdAt, state: 'done' },
     {
       label: 'Crawler thực thi',
-      detail: displayedStatus === 'QUEUED' ? 'Đang chờ worker' : `${live.processed}/${scan.progress.discovered} trang đã xử lý`,
+      detail: displayedStatus === 'QUEUED' ? 'Đang chờ worker' : `${scan.progress.processed}/${scan.progress.discovered} trang đã xử lý`,
       state: displayedStatus === 'QUEUED' ? 'pending' : active ? 'active' : 'done',
     },
     {
@@ -226,14 +228,19 @@ export function ScanPage() {
     setCancelError(null)
     try {
       const cancelled = await webLensService.cancelScan(scan.id)
-      setCancelAccepted(cancelled.status === 'CANCEL_REQUESTED')
-      live.setStatus(cancelled.status)
+      setCommandState({ scanId, status: cancelled.status })
     } catch (error: unknown) {
       const requestId = error instanceof ApiError ? ` · Mã theo dõi ${error.requestId}` : ''
       setCancelError(`${error instanceof Error ? error.message : 'Không thể hủy lần quét.'}${requestId}`)
     } finally {
       setCancelling(false)
     }
+  }
+
+  function applyPageSearch(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    const q = String(new FormData(event.currentTarget).get('q') ?? '').trim()
+    setPageFilter((current) => ({ ...current, q }))
   }
 
   return (
@@ -266,7 +273,7 @@ export function ScanPage() {
         <div className="scan-control-meta">
           <span><Activity />TRẠNG THÁI VẬN HÀNH</span>
           <span className={scanState.refreshing || pagesState.refreshing ? 'is-syncing' : ''}>
-            <i aria-hidden="true" />{isBackendMode ? 'Đồng bộ tự động' : 'Dữ liệu mô phỏng'}
+            <i aria-hidden="true" />Đồng bộ tự động
           </span>
         </div>
         <div className="scan-control-main">
@@ -275,8 +282,8 @@ export function ScanPage() {
           </div>
           <div className="scan-progress-copy">
             <span className="scan-eyebrow">PROGRESS VERSION · LIVE PROJECTION</span>
-            <h2>{live.processed} trên {scan.progress.discovered} trang</h2>
-            <p>Giới hạn cứng {scan.progress.limit} trang · Thời lượng {scan.duration} · Collector {scan.collectorVersion ?? 'crawler-v1'}</p>
+            <h2>{scan.progress.processed} trên {scan.progress.discovered} trang</h2>
+            <p>Giới hạn cứng {scan.progress.limit} trang · Thời lượng {scan.duration} · Collector {scan.collectorVersion ?? 'Chưa công bố'}</p>
           </div>
           <div className="analytics-signal">
             <Database />
@@ -288,8 +295,8 @@ export function ScanPage() {
         <div className="scan-kpis">
           <div><FileSearch /><span><small>PHÁT HIỆN</small><strong>{scan.progress.discovered}</strong></span></div>
           <div><CircleDashed /><span><small>TRONG HÀNG ĐỢI</small><strong>{scan.progress.queued}</strong></span></div>
-          <div><Gauge /><span><small>Đã xử lý</small><strong>{live.processed}</strong></span></div>
-          <div><Check /><span><small>THÀNH CÔNG</small><strong>{displayedSucceeded}</strong></span></div>
+          <div><Gauge /><span><small>ĐƯỢC XỬ LÝ</small><strong>{scan.progress.processed}</strong></span></div>
+          <div><Check /><span><small>THÀNH CÔNG</small><strong>{scan.progress.succeeded}</strong></span></div>
           <div><AlertTriangle /><span><small>THẤT BẠI</small><strong>{scan.progress.failed}</strong></span></div>
         </div>
       </section>
@@ -297,8 +304,8 @@ export function ScanPage() {
       <section className="scan-workspace">
         <div className="scan-tabs" role="tablist" aria-label="Nội dung báo cáo quét">
           <button id="scan-tab-overview" role="tab" aria-selected={tab === 'overview'} aria-controls="scan-panel" className={tab === 'overview' ? 'active' : ''} type="button" onClick={() => setTab('overview')}>Tổng quan</button>
-          <button id="scan-tab-pages" role="tab" aria-selected={tab === 'pages'} aria-controls="scan-panel" className={tab === 'pages' ? 'active' : ''} type="button" onClick={() => setTab('pages')}>Trang <span>{allPages.length}</span></button>
-          <button id="scan-tab-issues" role="tab" aria-selected={tab === 'issues'} aria-controls="scan-panel" className={tab === 'issues' ? 'active' : ''} type="button" onClick={() => setTab('issues')}>Vấn đề <span>{issuePages.length}</span></button>
+          <button id="scan-tab-pages" role="tab" aria-selected={tab === 'pages'} aria-controls="scan-panel" className={tab === 'pages' ? 'active' : ''} type="button" onClick={() => setTab('pages')}>Trang <span>{totalUrlCount.toLocaleString('vi-VN')}</span></button>
+          <button id="scan-tab-issues" role="tab" aria-selected={tab === 'issues'} aria-controls="scan-panel" className={tab === 'issues' ? 'active' : ''} type="button" onClick={() => setTab('issues')}>Trang cần chú ý <span>{issuePageCount.toLocaleString('vi-VN')}</span></button>
           <div className="scan-data-freshness">
             <i className={analyticsReady ? 'fresh' : ''} aria-hidden="true" />
             {analyticsReady ? `Watermark ${report?.analyticsWatermark ?? 'sẵn sàng'}` : `${analyticsPublished}/${analyticsExpected} đã lập chỉ mục`}
@@ -321,13 +328,13 @@ export function ScanPage() {
           {!pagesState.loading && tab === 'overview' ? (
             <div className="scan-overview-grid">
               <article className="scan-insight-card">
-                <header><div><span className="scan-eyebrow">RESPONSE PROFILE</span><h2>Phân bố trạng thái HTTP</h2></div><strong>{allPages.length} URL</strong></header>
+                <header><div><span className="scan-eyebrow">TOÀN BỘ SCAN</span><h2>Phân bố trạng thái HTTP</h2></div><strong>{totalUrlCount.toLocaleString('vi-VN')} URL</strong></header>
                 <div className="http-distribution">
                   {httpBuckets.map((bucket) => (
                     <div key={bucket.label}>
                       <span>{bucket.label}</span>
-                      <div><i className={`http-bar--${bucket.tone}`} style={{ width: `${Math.round((bucket.count / Math.max(allPages.length, 1)) * 100)}%` }} /></div>
-                      <strong>{bucket.count}</strong>
+                      <div><i className={`http-bar--${bucket.tone}`} style={{ width: `${Math.round((bucket.count / Math.max(totalUrlCount, 1)) * 100)}%` }} /></div>
+                      <strong>{bucket.count.toLocaleString('vi-VN')}</strong>
                     </div>
                   ))}
                 </div>
@@ -374,16 +381,50 @@ export function ScanPage() {
             </div>
           ) : null}
 
+          {!pagesState.loading && (tab === 'pages' || tab === 'issues') ? (
+            <form className="list-filters" onSubmit={applyPageSearch}>
+              <label className="search-field"><Search aria-hidden="true" /><span className="sr-only">Tìm URL</span><input name="q" defaultValue={pageFilter.q} placeholder="Tìm URL…" maxLength={200} /></label>
+              <label className="select-field"><span className="sr-only">Kết quả</span><select value={pageFilter.outcome} onChange={(event) => setPageFilter((current) => ({ ...current, outcome: event.target.value }))}><option value="all">Mọi kết quả</option><option value="success">Thành công</option><option value="warning">Bỏ qua</option><option value="failed">Thất bại</option></select></label>
+              <label className="select-field"><span className="sr-only">Nhóm HTTP</span><select value={pageFilter.http} onChange={(event) => setPageFilter((current) => ({ ...current, http: event.target.value }))}><option value="all">Mọi HTTP</option><option value="2xx">2xx</option><option value="3xx">3xx</option><option value="4xx">4xx</option><option value="5xx">5xx</option><option value="none">Không phản hồi</option></select></label>
+              <label className="select-field"><span className="sr-only">Indexable</span><select value={pageFilter.indexable} onChange={(event) => setPageFilter((current) => ({ ...current, indexable: event.target.value }))}><option value="all">Mọi indexability</option><option value="yes">Indexable</option><option value="no">Không indexable</option></select></label>
+              <button className="button button--secondary button--small" type="submit">Áp dụng</button>
+            </form>
+          ) : null}
           {!pagesState.loading && tab === 'pages' ? <ScanPagesTable pages={allPages} /> : null}
           {!pagesState.loading && tab === 'issues' ? <ScanPagesTable pages={issuePages} /> : null}
+          {!pagesState.loading && (tab === 'pages' || tab === 'issues') ? (
+            <CursorPagination
+              pageNumber={pageIndex + 1}
+              itemCount={tab === 'pages' ? allPages.length : issuePages.length}
+              totalItems={tab === 'pages' ? totalUrlCount : issuePageCount}
+              canPrevious={pageIndex > 0}
+              canNext={Boolean(report?.nextCursor)}
+              disabled={pagesState.refreshing}
+              onPrevious={() => setCursorState((current) => {
+                const base = current.scanId === scanId && current.filterKey === filterKey ? current : activeCursorState
+                return { ...base, pageIndex: Math.max(0, base.pageIndex - 1) }
+              })}
+              onNext={() => {
+                if (!report?.nextCursor) return
+                setCursorState((current) => {
+                  const base = current.scanId === scanId && current.filterKey === filterKey ? current : activeCursorState
+                  return {
+                    ...base,
+                    history: [...base.history.slice(0, base.pageIndex + 1), report.nextCursor],
+                    pageIndex: base.pageIndex + 1,
+                  }
+                })
+              }}
+            />
+          ) : null}
         </div>
       </section>
 
       <section className={`finding-strip ${totalFindings === 0 ? 'finding-strip--clean' : ''}`}>
         <div>
-          {totalFindings > 0 ? <SeverityBadge severity="warning" /> : <Check />}
-          <strong>{totalFindings > 0 ? `${totalFindings} finding${totalFindings > 1 ? 's' : ''} cần xem` : 'Chưa có finding trong dữ liệu đã công bố'}</strong>
-          <span>Kết quả deterministic, không dùng AI để quyết định.</span>
+          {issuePageCount > 0 ? <SeverityBadge severity="warning" /> : totalFindings > 0 ? <SeverityBadge severity="info" /> : <Check />}
+          <strong>{totalFindings > 0 ? `${issuePageCount.toLocaleString('vi-VN')} trang cần chú ý · ${totalFindings.toLocaleString('vi-VN')} kết quả kiểm tra` : 'Chưa có kết quả từ các rule hiện tại'}</strong>
+          <span>Kết quả được tính trên toàn bộ analytical projection; thông tin mức INFO không làm trang bị xếp vào nhóm cần chú ý.</span>
         </div>
         {firstIssuePage ? <Link to={`/app/pages/${firstIssuePage.id}`}>Mở bằng chứng nổi bật <ArrowRight /></Link> : null}
       </section>

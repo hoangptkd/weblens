@@ -1,0 +1,12 @@
+<service>
+  <id>WebLensCapture</id>
+  <name>WebLens Capture Worker</name>
+  <description>WebLens Playwright Capture Worker</description>
+  <executable>powershell.exe</executable>
+  <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\WebLens\current\infra\production-windows\run-service.ps1 capture</arguments>
+  <startmode>Automatic</startmode>
+  <stoptimeout>60sec</stoptimeout>
+  <onfailure action="restart" delay="15 sec" />
+  <logpath>C:\ProgramData\WebLens\logs</logpath>
+  <log mode="roll-by-size"><sizeThreshold>20480</sizeThreshold><keepFiles>5</keepFiles></log>
+</service>

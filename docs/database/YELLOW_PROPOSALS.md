@@ -196,7 +196,7 @@ hữu retry và cancellation? Quota token/cost và truy vấn báo cáo? Retenti
 prompt thô, redaction, output expiry và metadata usage nào được phép sống lâu hơn
 output?
 
-## 8. reconstruction_jobs — ĐƯỢC PHÊ DUYỆT CHO ADR-007
+## 8. reconstruction_jobs — REVISION 1 ĐƯỢC DUYỆT; SITE CLONE CHỜ REVIEW
 
 Người dùng đã làm rõ proposal đầu tiên: reconstruction là gói clone tĩnh
 best-effort của **một trang browser capture**, tham khảo hành vi của Pagesource;
@@ -206,6 +206,11 @@ gốc. Quyết định kiến trúc và schema chi tiết đã được duyệt 
 `docs/database/RECONSTRUCTION_STATIC_CLONE_PROPOSAL.md`.
 
 Revision 1 được người dùng phê duyệt ngày 2026-09-13 để implementation.
+
+Ngày 2026-09-18, người dùng chấp thuận hướng mở rộng clone toàn website trong
+ADR-007 revision 2. Phê duyệt hướng sản phẩm này không mở rộng schema revision 1.
+Workload/schema site clone đang chờ review tại
+`docs/database/RECONSTRUCTION_SITE_CLONE_PROPOSAL.md`; chưa được tạo DDL/runtime.
 
 Nếu một workflow reconstruction bất đồng bộ được duyệt, các trường dự kiến có thể
 gồm `id`, `owner_id`, tham chiếu source evidence chưa giải quyết, kind/version
@@ -223,7 +228,7 @@ hoặc mã được sinh không? Phải định nghĩa isolation, quyền với 
 vi khi evidence thiếu, khả năng tái lập, cancellation và retention source/output
 trước khi chọn schema. Không tự suy ra quan hệ cuối với snapshot/resource.
 
-## 9. reconstruction_artifacts — ĐƯỢC PHÊ DUYỆT CHO ADR-007
+## 9. reconstruction_artifacts — REVISION 1 ĐƯỢC DUYỆT; SITE CLONE CHỜ REVIEW
 
 Mục đích có điều kiện: lập chỉ mục archive ZIP và manifest của reconstruction job
 đã được phê duyệt mà không lưu payload lớn trong hàng quan hệ. Proposal hiện tại

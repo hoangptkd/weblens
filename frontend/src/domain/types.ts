@@ -10,6 +10,23 @@ export type ScanStatus =
 export type CaptureStatus = 'QUEUED' | 'DISPATCHED' | 'RUNNING' | 'INDEXING' | 'COMPLETED' | 'PARTIAL_SUCCESS' | 'FAILED' | 'CANCELLED'
 export type FindingSeverity = 'critical' | 'warning' | 'info'
 
+export interface PageResult<T> {
+  items: T[]
+  page: number
+  size: number
+  totalItems: number
+  totalPages: number
+}
+
+export interface DashboardSummary {
+  activeWebsites: number
+  scansLast30Days: number
+  activeScans: number
+  processedPages: number
+  succeededPages: number
+  failedPages: number
+}
+
 export interface Website {
   id: string
   name: string
@@ -19,7 +36,7 @@ export interface Website {
   latestStatus?: ScanStatus
   updatedAt: string
   pageCount: number
-  findingCount: number
+  failedPageCount: number
 }
 
 export interface ScanProgress {
@@ -40,7 +57,6 @@ export interface Scan {
   finishedAt?: string
   duration: string
   progress: ScanProgress
-  findingCount: number
   collectorVersion?: string
   effectiveConfig?: {
     maxPages: number
@@ -114,6 +130,16 @@ export interface ScanPageRecord {
 
 export interface ScanPagesReport {
   items: ScanPageRecord[]
+  summary: {
+    totalUrlCount: number
+    issuePageCount: number
+    findingCount: number
+    status2xxCount: number
+    status3xxCount: number
+    status4xxCount: number
+    status5xxCount: number
+    noResponseCount: number
+  }
   analyticsExpectedCount: number
   analyticsPublishedCount: number
   analyticsWatermark: string | null
@@ -218,4 +244,84 @@ export interface ServiceError {
   code: string
   message: string
   requestId: string
+}
+
+export type SiteCloneStatus =
+  | 'WAITING_FOR_SCAN'
+  | 'QUEUED'
+  | 'DISPATCHED'
+  | 'RUNNING'
+  | 'ASSEMBLING'
+  | 'CANCEL_REQUESTED'
+  | 'PUBLISHED'
+  | 'PARTIAL'
+  | 'FAILED'
+  | 'CANCELLED'
+  | 'EXPIRED'
+
+export interface SiteCloneArtifact {
+  id: string
+  kind: 'ARCHIVE_SHARD' | 'MANIFEST'
+  shardNumber: number
+  filename: string
+  byteSize: number
+  sha256: string
+  expiresAt: string
+}
+
+export interface SiteClone {
+  id: string
+  websiteId?: string
+  scanId: string
+  targetUrl: string
+  status: SiteCloneStatus
+  discoveredCount: number
+  processedCount: number
+  succeededCount: number
+  failedCount: number
+  artifactCount: number
+  totalArchiveBytes: number
+  terminalCode?: string
+  terminalMessage?: string
+  createdAt: string
+  startedAt?: string
+  finishedAt?: string
+  artifacts: SiteCloneArtifact[]
+}
+
+export type SiteClonePageStatus = 'QUEUED' | 'RENDERING' | 'SUCCEEDED' | 'FAILED' | 'CANCELLED'
+
+export interface SiteCloneProgressPage {
+  pageId: string
+  ordinal: number
+  url: string
+  status: SiteClonePageStatus
+  attemptCount: number
+  failureCode: string | null
+  startedAt: string | null
+  finishedAt: string | null
+  updatedAt: string
+  retryAt: string
+  leaseExpired: boolean
+}
+
+export interface SiteCloneProgress {
+  available: boolean
+  jobId: string
+  scanId: string
+  correlationId: string | null
+  phase: SiteCloneStatus | 'INGESTING'
+  ingestionComplete: boolean
+  observedAt: string
+  updatedAt: string | null
+  startedAt: string | null
+  finishedAt: string | null
+  phaseAttemptCount: number
+  phaseRetryAt: string | null
+  phaseLeaseExpired: boolean
+  terminalCode: string | null
+  counts: Partial<Record<SiteClonePageStatus, number>>
+  activePages: SiteCloneProgressPage[]
+  items: SiteCloneProgressPage[]
+  nextAfter: number | null
 }

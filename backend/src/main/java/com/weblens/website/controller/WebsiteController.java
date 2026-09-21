@@ -14,12 +14,16 @@ import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Size;
 import java.net.URI;
+import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PatchMapping;
@@ -59,10 +63,24 @@ public class WebsiteController {
             @AuthenticationPrincipal Jwt jwt,
             @RequestParam(defaultValue = "0") @Min(0) int page,
             @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
-            @RequestParam(defaultValue = "ACTIVE") WebsiteStatus status,
+            @RequestParam(name = "status", defaultValue = "ACTIVE") List<WebsiteStatus> statuses,
+            @RequestParam(required = false) @Size(max = 200) String q,
+            @RequestParam(required = false) @Size(max = 253) String hostname,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant createdFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant createdTo,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant updatedFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant updatedTo,
+            @RequestParam(required = false) Boolean hasActiveScan,
             @RequestParam(defaultValue = "updatedAt,desc") String sort
     ) {
-        return websites.list(AuthenticatedUserId.from(jwt), page, size, status, sort);
+        return websites.list(
+                AuthenticatedUserId.from(jwt),
+                page,
+                size,
+                new WebsiteService.ListFilter(
+                        statuses, q, hostname, createdFrom, createdTo, updatedFrom, updatedTo, hasActiveScan, sort
+                )
+        );
     }
 
     @GetMapping("/{websiteId}")

@@ -17,7 +17,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { webLensService } from '../api/serviceMode'
+import { webLensService } from '../api/webLensApiService'
 import { ErrorState, LoadingState } from '../components/StateView'
 import type { CapturedResource } from '../domain/types'
 import { useAsyncData } from '../hooks/useAsyncData'

@@ -1,0 +1,206 @@
+name: CI and production deploy
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  backend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - name: Verify backend
+        working-directory: backend
+        run: chmod +x mvnw && ./mvnw -B verify
+
+  crawler:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_DB: weblens_crawler_test
+          POSTGRES_USER: weblens_test
+          POSTGRES_PASSWORD: test-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U weblens_test -d weblens_crawler_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+      clickhouse:
+        image: clickhouse/clickhouse-server:26.3
+        env:
+          CLICKHOUSE_DB: weblens_crawl_analytics
+          CLICKHOUSE_USER: weblens_test
+          CLICKHOUSE_PASSWORD: test-only-password
+          CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+        ports: ["9000:9000"]
+        options: >-
+          --health-cmd "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping"
+          --health-interval 5s --health-timeout 3s --health-retries 30
+    env:
+      WEBLENS_TEST_POSTGRES_URL: postgres://weblens_test:test-only-password@localhost:5432/weblens_crawler_test?sslmode=disable
+      WEBLENS_TEST_CLICKHOUSE_ADDR: localhost:9000
+      WEBLENS_TEST_CLICKHOUSE_USERNAME: weblens_test
+      WEBLENS_TEST_CLICKHOUSE_PASSWORD: test-only-password
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: crawler/go.mod
+          cache-dependency-path: crawler/go.sum
+      - name: Test and vet crawler
+        working-directory: crawler
+        run: go test ./... && go vet ./...
+
+  capture-worker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env:
+          POSTGRES_DB: weblens_capture_test
+          POSTGRES_USER: weblens_test
+          POSTGRES_PASSWORD: test-only-password
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U weblens_test -d weblens_capture_test"
+          --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      CAPTURE_TEST_DATABASE_URL: postgresql://weblens_test:test-only-password@localhost:5432/weblens_capture_test
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: capture-worker/package-lock.json
+      - name: Verify capture worker
+        working-directory: capture-worker
+        run: npm ci && npm test && npm run test:integration && npm run typecheck && npm run build
+
+  frontend:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Verify frontend
+        working-directory: frontend
+        run: npm ci && npm run lint && npm test && npm run build
+
+  release:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: [backend, crawler, capture-worker, frontend]
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+          cache-dependency-path: backend/pom.xml
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6
+        with:
+          go-version-file: crawler/go.mod
+          cache-dependency-path: crawler/go.sum
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22.23.2"
+          cache: npm
+          cache-dependency-path: |
+            capture-worker/package-lock.json
+            frontend/package-lock.json
+      - name: Build Windows release
+        shell: pwsh
+        run: |
+          Push-Location backend
+          .\mvnw.cmd -B -DskipTests package
+          Pop-Location
+          Push-Location crawler
+          $env:GOOS = 'windows'
+          $env:GOARCH = 'amd64'
+          go build -trimpath -ldflags='-s -w' -o weblens-crawler.exe ./cmd/weblens-crawler
+          Pop-Location
+          Push-Location capture-worker
+          npm ci
+          npm run build
+          $env:PLAYWRIGHT_BROWSERS_PATH = '0'
+          npx playwright install chromium
+          npm prune --omit=dev
+          Pop-Location
+          Push-Location frontend
+          npm ci
+          npm run build
+          Pop-Location
+          .\infra\production-windows\build-release.ps1 -Commit '${{ github.sha }}'
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: weblens-${{ github.sha }}-windows-amd64
+          path: artifacts/weblens-${{ github.sha }}-windows-amd64.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  deploy:
+    if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
+    needs: release
+    runs-on: windows-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: ${{ vars.WEBLENS_PUBLIC_URL }}
+    concurrency:
+      group: production
+      cancel-in-progress: false
+    env:
+      VPS_HOST: ${{ secrets.VPS_HOST }}
+      VPS_PORT: ${{ secrets.VPS_PORT }}
+      VPS_USER: ${{ secrets.VPS_USER }}
+      VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
+      VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: weblens-${{ github.sha }}-windows-amd64
+          path: artifacts
+      - name: Configure SSH
+        shell: pwsh
+        run: |
+          if (-not $env:VPS_HOST -or -not $env:VPS_USER -or -not $env:VPS_SSH_PRIVATE_KEY -or -not $env:VPS_HOST_KEY) { throw 'Missing VPS SSH secret' }
+          if (-not $env:VPS_PORT) { 'VPS_PORT=22' | Out-File $env:GITHUB_ENV -Append -Encoding utf8 }
+          New-Item -ItemType Directory -Force "$HOME\.ssh" | Out-Null
+          $env:VPS_SSH_PRIVATE_KEY | Set-Content -NoNewline "$HOME\.ssh\id_ed25519"
+          $env:VPS_HOST_KEY | Set-Content "$HOME\.ssh\known_hosts"
+          icacls "$HOME\.ssh\id_ed25519" /inheritance:r /grant:r "${env:USERNAME}:R" | Out-Null
+      - name: Upload and activate immutable release
+        shell: pwsh
+        run: |
+          $ssh = @('-p', $env:VPS_PORT, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', "$HOME\.ssh\id_ed25519")
+          $remote = "$env:VPS_USER@$env:VPS_HOST"
+          & ssh @ssh $remote 'powershell.exe -NoProfile -Command "New-Item -ItemType Directory -Force C:\ProgramData\WebLens\incoming | Out-Null"'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare remote release directory' }
+          & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME\.ssh\id_ed25519" "artifacts\weblens-${{ github.sha }}-windows-amd64.zip" "${remote}:C:/ProgramData/WebLens/incoming/"
+          if ($LASTEXITCODE -ne 0) { throw 'Could not upload release' }
+          & ssh @ssh $remote "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\WebLens\current\infra\production-windows\deploy.ps1 -ReleaseZip C:\ProgramData\WebLens\incoming\weblens-${{ github.sha }}-windows-amd64.zip -Commit ${{ github.sha }}"
+          if ($LASTEXITCODE -ne 0) { throw 'Remote deployment failed' }

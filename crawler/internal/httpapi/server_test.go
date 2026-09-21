@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -36,8 +37,12 @@ func (*fakeCommandStore) GetReportState(_ context.Context, ownerID, scanID uuid.
 	return model.ReportState{OwnerID: ownerID, ScanID: scanID}, nil
 }
 
-func (*fakeCommandStore) ListPages(context.Context, uuid.UUID, uuid.UUID, int, string, uuid.UUID) ([]model.ReportPage, bool, error) {
+func (*fakeCommandStore) ListPages(context.Context, uuid.UUID, uuid.UUID, int, string, uuid.UUID, model.PageFilters) ([]model.ReportPage, bool, error) {
 	return []model.ReportPage{}, false, nil
+}
+
+func (*fakeCommandStore) ScanSummary(context.Context, uuid.UUID, uuid.UUID) (model.ScanReportSummary, error) {
+	return model.ScanReportSummary{}, nil
 }
 
 func (*fakeCommandStore) GetPage(context.Context, uuid.UUID, uuid.UUID) (model.ReportPage, error) {
@@ -53,6 +58,9 @@ func TestCommandEndpointRequiresServiceToken(t *testing.T) {
 	server.Handler().ServeHTTP(response, request)
 	if response.Code != http.StatusUnauthorized || store.called {
 		t.Fatalf("unexpected response: status=%d called=%v", response.Code, store.called)
+	}
+	if response.Header().Get("Content-Type") != "application/problem+json" || response.Header().Get("X-Correlation-ID") == "" {
+		t.Fatalf("problem response is missing standard headers: %v", response.Header())
 	}
 }
 
@@ -85,6 +93,46 @@ func TestCommandEndpointRejectsBodyLargerThan64KiB(t *testing.T) {
 
 	if response.Code != http.StatusRequestEntityTooLarge || store.called {
 		t.Fatalf("unexpected response: status=%d called=%v", response.Code, store.called)
+	}
+}
+
+func TestPageFiltersAreNormalizedAndValidated(t *testing.T) {
+	t.Parallel()
+	request := httptest.NewRequest(http.MethodGet,
+		"/internal/v1/reports/scans/id/pages?outcome=failed&outcome=SUCCESS&statusMin=400&statusMax=599&q=docs&indexable=false&contentType=Text%2FHTML&severity=warning&findingCode=title.missing",
+		nil,
+	)
+	filters, err := pageFiltersQuery(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filters.Outcomes) != 2 || filters.Outcomes[0] != "FAILED" || filters.Outcomes[1] != "SUCCESS" {
+		t.Fatalf("unexpected outcomes: %#v", filters.Outcomes)
+	}
+	if filters.StatusMin == nil || *filters.StatusMin != 400 || filters.StatusMax == nil || *filters.StatusMax != 599 {
+		t.Fatalf("unexpected status range: %#v", filters)
+	}
+	if filters.Indexable == nil || *filters.Indexable || filters.ContentTypes[0] != "text/html" {
+		t.Fatalf("unexpected normalized filters: %#v", filters)
+	}
+}
+
+func TestPageCursorIsBoundToFilters(t *testing.T) {
+	t.Parallel()
+	store := &fakeCommandStore{}
+	server := NewServer(store, store, testServiceToken, testLogger())
+	cursor := encodePageCursor(pageCursor{URL: "https://example.com/", ID: uuid.New(), Filter: "another-filter"})
+	request := httptest.NewRequest(http.MethodGet,
+		"/internal/v1/reports/scans/"+uuid.NewString()+"/pages?ownerId="+uuid.NewString()+"&issuesOnly=true&cursor="+url.QueryEscape(cursor),
+		nil,
+	)
+	request.Header.Set("X-WebLens-Service-Token", testServiceToken)
+	response := httptest.NewRecorder()
+
+	server.Handler().ServeHTTP(response, request)
+
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("expected filter-bound cursor rejection, got %d", response.Code)
 	}
 }
 

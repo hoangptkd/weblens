@@ -38,6 +38,86 @@ export interface CaptureCommandEnvelope {
   payload: CaptureCommandPayload
 }
 
+export interface SiteCloneCommandPayload {
+  siteCloneRequestId: string
+  ownerId: string
+  scanId: string
+  rootUrl: string
+  maxPages: number
+  maxInputBytes: number
+  maxArchiveBytes: number
+  maxShardBytes: number
+  pageConcurrency: number
+  maxRetriesPerPage: number
+  maxDurationSeconds: number
+  archiveRetentionDays: number
+  metadataRetentionDays: number
+  sameOriginOnly: true
+}
+
+export interface SiteCloneRequestedEnvelope {
+  messageId: string
+  aggregateType: 'SITE_CLONE'
+  aggregateId: string
+  aggregateVersion: number
+  messageType: 'SITE_CLONE_REQUESTED'
+  contractVersion: 1
+  correlationId: string
+  occurredAt: string
+  payload: SiteCloneCommandPayload
+}
+
+export interface SiteCloneCancelEnvelope {
+  messageId: string
+  aggregateType: 'SITE_CLONE'
+  aggregateId: string
+  aggregateVersion: number
+  messageType: 'SITE_CLONE_CANCEL_REQUESTED'
+  contractVersion: 1
+  correlationId: string
+  occurredAt: string
+  payload: {
+    siteCloneRequestId: string
+    ownerId: string
+    requestedAt: string
+  }
+}
+
+export type SiteCloneCommandEnvelope = SiteCloneRequestedEnvelope | SiteCloneCancelEnvelope
+
+export interface SiteBundleFile {
+  kind: 'DOCUMENT' | 'RESOURCE'
+  localPath: string
+  sourceUrl: string
+  contentType: string
+  body: Buffer
+}
+
+export interface SitePageBundle {
+  schemaVersion: 1
+  pageId: string
+  sourceFinalUrl: string
+  publicFinalUrl: string
+  mainPath: string
+  capturedAt: string
+  design?: {
+    locale: string
+    semanticRole: import('./design-clone.js').SemanticRole
+    routeTemplate: string
+    layoutFingerprint: string | null
+    layoutFingerprintVersion: string
+  }
+  files: SiteBundleFile[]
+}
+
+export interface CapturePageOptions {
+  mainPath?: string
+  contentAddressedResources?: boolean
+  includeSiteBundle?: boolean
+  preserveUnmatchedReferences?: boolean
+  captureScreenshot?: boolean
+}
+
 export interface RenderedMetadata {
   title: string
   description: string
@@ -126,6 +206,7 @@ export interface ReconstructionBuild {
   archivePath: string | null
   temporaryDirectory: string | null
   manifest: Buffer | null
+  siteBundle: Omit<SitePageBundle, 'pageId'> | null
 }
 
 export interface CaptureResult {

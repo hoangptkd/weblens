@@ -166,6 +166,7 @@ class CaptureReportClientTest {
     private static CaptureProperties properties() {
         return new CaptureProperties(
                 URI.create("http://capture-worker.test/internal/v1/commands/captures"),
+                URI.create("http://capture-worker.test/internal/v1/commands/site-clones"),
                 URI.create("http://capture-worker.test"),
                 TOKEN,
                 Duration.ofSeconds(1),

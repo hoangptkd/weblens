@@ -58,11 +58,76 @@ func TestParseHTMLExtractsAdvancedSEOSignals(t *testing.T) {
 	if len(data.Hreflang) != 1 || data.Hreflang[0].URL != "https://example.com/vi/page" {
 		t.Fatalf("unexpected hreflang: %#v", data.Hreflang)
 	}
+	if data.CanonicalDeclared != 1 || data.CanonicalInvalid != 0 || data.HreflangInvalid != 0 {
+		t.Fatalf("unexpected SEO declaration counters: %#v", data)
+	}
 	if len(data.SchemaOrgTypes) != 4 || data.SchemaOrgErrorCount != 1 {
 		t.Fatalf("unexpected structured-data summary: %#v", data)
 	}
 	if data.ScriptCount != 3 || data.StylesheetCount != 1 {
 		t.Fatalf("unexpected asset counts: scripts=%d stylesheets=%d", data.ScriptCount, data.StylesheetCount)
+	}
+}
+
+func TestParseHTMLDistinguishesDecorativeAndNamedImages(t *testing.T) {
+	t.Parallel()
+	body := `<!doctype html><html><head><title>Images</title></head><body>
+		<span id="chart-label">Biểu đồ doanh thu</span>
+		<h1><img src="logo.svg" alt="WebLens"></h1>
+		<img src="missing.png">
+		<img src="decorative.png" alt="">
+		<img src="whitespace.png" alt="  ">
+		<img src="presentational.png" role="presentation">
+		<img src="aria-label.png" aria-label="Ảnh đại diện">
+		<img src="aria-labelledby.png" aria-labelledby="chart-label">
+		<img src="hidden.png" hidden>
+	</body></html>`
+
+	data, err := ParseHTML([]byte(body), "https://example.com/", "example.com")
+	if err != nil {
+		t.Fatalf("ParseHTML returned an error: %v", err)
+	}
+	if len(data.H1) != 1 || data.H1[0] != "WebLens" {
+		t.Fatalf("expected image alternative to name H1, got %#v", data.H1)
+	}
+	if data.ImageMissingAltCount != 2 || len(data.ImageMissingAltSample) != 2 ||
+		data.ImageMissingAltSample[0] != 2 || data.ImageMissingAltSample[1] != 4 {
+		t.Fatalf("unexpected missing image alternatives: count=%d samples=%v", data.ImageMissingAltCount, data.ImageMissingAltSample)
+	}
+}
+
+func TestParseHTMLCombinesGenericRobotsMetaTags(t *testing.T) {
+	t.Parallel()
+	body := `<html><head>
+		<meta name="robots" content="follow">
+		<meta NAME="ROBOTS" content="noindex">
+	</head><body></body></html>`
+
+	data, err := ParseHTML([]byte(body), "https://example.com/", "example.com")
+	if err != nil {
+		t.Fatalf("ParseHTML returned an error: %v", err)
+	}
+	if data.MetaRobots != "follow, noindex" {
+		t.Fatalf("unexpected combined robots directives: %q", data.MetaRobots)
+	}
+}
+
+func TestParseHTMLCountsInvalidAndDuplicateSEODeclarations(t *testing.T) {
+	t.Parallel()
+	body := `<html><head>
+		<link rel="canonical" href="/first">
+		<link rel="canonical" href="mailto:invalid@example.com">
+		<link rel="alternate" hreflang="" href="/missing-language">
+		<link rel="alternate" hreflang="vi" href="mailto:invalid@example.com">
+	</head><body></body></html>`
+
+	data, err := ParseHTML([]byte(body), "https://example.com/", "example.com")
+	if err != nil {
+		t.Fatalf("ParseHTML returned an error: %v", err)
+	}
+	if data.CanonicalURL != "https://example.com/first" || data.CanonicalDeclared != 2 ||
+		data.CanonicalInvalid != 1 || data.HreflangInvalid != 2 {
+		t.Fatalf("unexpected invalid SEO declaration counters: %#v", data)
 	}
 }
 
@@ -103,6 +168,12 @@ func TestIndexabilityCombinesMetaAndResponseHeader(t *testing.T) {
 		{name: "meta", statusCode: 200, meta: "noindex,follow", reason: "META_ROBOTS_NOINDEX"},
 		{name: "header", statusCode: 200, header: "noindex", reason: "X_ROBOTS_TAG_NOINDEX"},
 		{name: "both", statusCode: 200, meta: "noindex", header: "noindex", reason: "META_AND_X_ROBOTS_NOINDEX"},
+		{name: "meta none", statusCode: 200, meta: "none", reason: "META_ROBOTS_NOINDEX"},
+		{name: "targeted header ignored", statusCode: 200, header: "googlebot: noindex", indexable: true, reason: "INDEXABLE"},
+		{name: "generic before targeted header", statusCode: 200, header: "noindex, googlebot: nofollow", reason: "X_ROBOTS_TAG_NOINDEX"},
+		{name: "generic header after targeted header", statusCode: 200, header: "googlebot: noindex\nnoindex", reason: "X_ROBOTS_TAG_NOINDEX"},
+		{name: "substring is not directive", statusCode: 200, meta: "x-noindex-test", indexable: true, reason: "INDEXABLE"},
+		{name: "redirect status", statusCode: 302, reason: "HTTP_STATUS_NOT_INDEXABLE"},
 		{name: "status", statusCode: 404, reason: "HTTP_STATUS_NOT_INDEXABLE"},
 	}
 	for _, test := range tests {

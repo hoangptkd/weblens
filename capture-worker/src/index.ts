@@ -5,6 +5,8 @@ import { loadConfig } from './config.js'
 import { CaptureDatabase, type ReconstructionObjects } from './database.js'
 import { log } from './log.js'
 import { startServer } from './server.js'
+import { SiteCloneDatabase } from './site-database.js'
+import { SiteCloneWorker } from './site-worker.js'
 import { cleanupStaticClone, STATIC_CLONE_MAX_ARCHIVE_BYTES } from './static-clone.js'
 import { ObjectStorage } from './storage.js'
 
@@ -12,17 +14,20 @@ const config = loadConfig()
 const database = new CaptureDatabase(config.databaseUrl)
 const analytics = new CaptureAnalytics(config)
 const storage = new ObjectStorage(config)
+const siteDatabase = new SiteCloneDatabase(database.pool)
 
 await database.migrate()
-await analytics.migrate()
+if (config.migrateClickHouseOnStart) await analytics.migrate()
 await storage.ensureBucket()
-const server = startServer(config, database, analytics, storage)
+const server = startServer(config, database, analytics, storage, siteDatabase)
 log('info', 'capture worker started', { port: config.port, concurrency: config.concurrency })
 
 let running = true
 const loops: Promise<void>[] = []
 for (let index = 0; index < config.concurrency; index++) loops.push(jobLoop(randomUUID()))
 loops.push(analyticsLoop(randomUUID()), eventLoop(randomUUID()), reconstructionGcLoop())
+const siteWorker = new SiteCloneWorker(config, siteDatabase, storage)
+loops.push(...siteWorker.start())
 
 async function jobLoop(workerId: string): Promise<void> {
   while (running) {
@@ -195,6 +200,7 @@ async function eventLoop(workerId: string): Promise<void> {
 async function shutdown(signal: string): Promise<void> {
   if (!running) return
   running = false
+  siteWorker.stop()
   log('info', 'capture worker stopping', { signal })
   server.close()
   await Promise.allSettled(loops)

@@ -24,4 +24,18 @@ class WebsiteTargetTest {
         assertThatThrownBy(() -> WebsiteTarget.parse("file:///etc/passwd"))
                 .isInstanceOf(InvalidWebsiteTargetException.class);
     }
+
+    @Test
+    void rejectsObviouslyNonPublicTargets() {
+        for (String url : java.util.List.of(
+                "http://localhost:5173/",
+                "http://localhost.:5173/",
+                "http://127.0.0.1/",
+                "http://10.0.0.1/",
+                "http://169.254.169.254/"
+        )) {
+            assertThatThrownBy(() -> WebsiteTarget.parse(url))
+                    .isInstanceOf(InvalidWebsiteTargetException.class);
+        }
+    }
 }

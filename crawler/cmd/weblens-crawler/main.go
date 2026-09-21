@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -60,13 +61,20 @@ func (s readyStore) GetReportState(ctx context.Context, ownerID, scanID uuid.UUI
 
 func main() {
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
-	if err := run(logger); err != nil {
+	if err := run(logger, os.Args[1:]); err != nil {
 		logger.Error("crawler stopped", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(logger *slog.Logger) error {
+func run(logger *slog.Logger, args []string) error {
+	migrationCommand := ""
+	if len(args) == 1 {
+		migrationCommand = args[0]
+	}
+	if len(args) > 1 || (migrationCommand != "" && migrationCommand != "migrate" && migrationCommand != "migrate-postgres" && migrationCommand != "migrate-clickhouse") {
+		return fmt.Errorf("usage: weblens-crawler [migrate|migrate-postgres|migrate-clickhouse]")
+	}
 	cfg, err := config.Load()
 	if err != nil {
 		return err
@@ -79,15 +87,21 @@ func run(logger *slog.Logger) error {
 
 	clickhouseOptions := analytics.Options{
 		Address: cfg.ClickHouseAddress, Database: cfg.ClickHouseDatabase,
-		Username: cfg.ClickHouseUsername, Password: cfg.ClickHousePassword,
+		Username: cfg.ClickHouseUsername, Password: cfg.ClickHousePassword, Secure: cfg.ClickHouseSecure,
 	}
-	if cfg.MigrateOnStart {
+	if migrationCommand == "migrate" || migrationCommand == "migrate-postgres" || cfg.MigrateOnStart {
 		if err := postgres.Migrate(startupContext, cfg.PostgresURL); err != nil {
 			return err
 		}
+	}
+	if migrationCommand == "migrate" || migrationCommand == "migrate-clickhouse" || cfg.MigrateOnStart {
 		if err := analytics.Migrate(startupContext, clickhouseOptions); err != nil {
 			return err
 		}
+	}
+	if migrationCommand != "" {
+		logger.Info("crawler migrations completed")
+		return nil
 	}
 
 	store, err := postgres.OpenWithHostConcurrency(startupContext, cfg.PostgresURL, cfg.HostConcurrency)

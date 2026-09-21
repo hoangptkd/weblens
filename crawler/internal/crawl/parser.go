@@ -19,6 +19,8 @@ type PageData struct {
 	MetaKeywords          string
 	CanonicalURL          string
 	CanonicalRelation     string
+	CanonicalDeclared     int
+	CanonicalInvalid      int
 	MetaRobots            string
 	HTMLLang              string
 	H1                    []string
@@ -28,6 +30,7 @@ type PageData struct {
 	H5                    []string
 	H6                    []string
 	Hreflang              []Hreflang
+	HreflangInvalid       int
 	OpenGraphTitle        string
 	OpenGraphDescription  string
 	OpenGraphImageURL     string
@@ -40,6 +43,7 @@ type PageData struct {
 	WordCount             int
 	ImageCount            int
 	ImageMissingAltCount  int
+	ImageMissingAltSample []int
 	ScriptCount           int
 	StylesheetCount       int
 	Links                 []Link
@@ -72,22 +76,23 @@ func ParseHTML(body []byte, pageURL, scopeHostname string) (PageData, error) {
 		Title:                firstText(document, "title", 2048),
 		MetaDescription:      metaContent(document, "description", 4096),
 		MetaKeywords:         metaContent(document, "keywords", 4096),
-		CanonicalURL:         canonical(document, base),
-		MetaRobots:           metaContent(document, "robots", 512),
+		MetaRobots:           metaContents(document, "robots", 512),
 		HTMLLang:             bounded(strings.TrimSpace(document.Find("html").First().AttrOr("lang", "")), 64),
-		H1:                   texts(document, "h1", 50, 2048),
-		H2:                   texts(document, "h2", 100, 2048),
-		H3:                   texts(document, "h3", 150, 2048),
-		H4:                   texts(document, "h4", 100, 2048),
-		H5:                   texts(document, "h5", 50, 2048),
-		H6:                   texts(document, "h6", 50, 2048),
 		OpenGraphTitle:       propertyContent(document, "og:title", 2048),
 		OpenGraphDescription: propertyContent(document, "og:description", 4096),
 		WordCount:            countWords(document.Find("body").Text()),
 	}
+	data.CanonicalURL, data.CanonicalDeclared, data.CanonicalInvalid = canonical(document, base)
+	labels := labelledTextByID(document)
+	data.H1 = headingTexts(document, labels, "h1", "1", 50, 2048)
+	data.H2 = headingTexts(document, labels, "h2", "2", 100, 2048)
+	data.H3 = headingTexts(document, labels, "h3", "3", 150, 2048)
+	data.H4 = headingTexts(document, labels, "h4", "4", 100, 2048)
+	data.H5 = headingTexts(document, labels, "h5", "5", 50, 2048)
+	data.H6 = headingTexts(document, labels, "h6", "6", 50, 2048)
 	data.CanonicalRelation = canonicalRelation(data.CanonicalURL, base.String())
 	data.OpenGraphImageURL = resolvedPropertyURL(document, "og:image", base, 8192)
-	data.Hreflang = hreflangLinks(document, base)
+	data.Hreflang, data.HreflangInvalid = hreflangLinks(document, base)
 	extractStructuredData(document, &data)
 	data.ScriptCount = document.Find("script").Length()
 	document.Find("link").Each(func(_ int, selection *goquery.Selection) {
@@ -95,10 +100,13 @@ func ParseHTML(body []byte, pageURL, scopeHostname string) (PageData, error) {
 			data.StylesheetCount++
 		}
 	})
-	document.Find("img").Each(func(_ int, image *goquery.Selection) {
+	document.Find("img").Each(func(index int, image *goquery.Selection) {
 		data.ImageCount++
-		if _, present := image.Attr("alt"); !present || strings.TrimSpace(image.AttrOr("alt", "")) == "" {
+		if imageNeedsTextAlternative(image, labels) {
 			data.ImageMissingAltCount++
+			if len(data.ImageMissingAltSample) < 10 {
+				data.ImageMissingAltSample = append(data.ImageMissingAltSample, index+1)
+			}
 		}
 	})
 	document.Find("a, area").EachWithBreak(func(_ int, selection *goquery.Selection) bool {
@@ -160,8 +168,9 @@ func canonicalRelation(canonicalURL, pageURL string) string {
 	return "NON_SELF"
 }
 
-func hreflangLinks(document *goquery.Document, base *url.URL) []Hreflang {
+func hreflangLinks(document *goquery.Document, base *url.URL) ([]Hreflang, int) {
 	values := make([]Hreflang, 0)
+	invalid := 0
 	document.Find("link").EachWithBreak(func(_ int, selection *goquery.Selection) bool {
 		if len(values) >= 100 {
 			return false
@@ -170,17 +179,20 @@ func hreflangLinks(document *goquery.Document, base *url.URL) []Hreflang {
 			return true
 		}
 		language := bounded(strings.TrimSpace(selection.AttrOr("hreflang", "")), 64)
-		if language == "" {
+		href := strings.TrimSpace(selection.AttrOr("href", ""))
+		if language == "" || href == "" {
+			invalid++
 			return true
 		}
-		resolved, err := ResolveURL(base.String(), strings.TrimSpace(selection.AttrOr("href", "")))
-		if err != nil {
+		resolved, err := ResolveURL(base.String(), href)
+		if err != nil || !isHTTPURL(resolved) {
+			invalid++
 			return true
 		}
 		values = append(values, Hreflang{Language: language, URL: bounded(resolved, 8192)})
 		return true
 	})
-	return values
+	return values, invalid
 }
 
 const (
@@ -324,33 +336,136 @@ func metaContent(document *goquery.Document, name string, limit int) string {
 	return result
 }
 
-func canonical(document *goquery.Document, base *url.URL) string {
-	var result string
-	document.Find("link").EachWithBreak(func(_ int, selection *goquery.Selection) bool {
-		if containsToken(tokenValues(selection.AttrOr("rel", "")), "canonical") {
-			if resolved, err := ResolveURL(base.String(), selection.AttrOr("href", "")); err == nil {
-				result = bounded(resolved, 8192)
-			}
-			return false
+func metaContents(document *goquery.Document, name string, limit int) string {
+	values := make([]string, 0)
+	document.Find("meta").Each(func(_ int, selection *goquery.Selection) {
+		if !strings.EqualFold(strings.TrimSpace(selection.AttrOr("name", "")), name) {
+			return
 		}
-		return true
+		if value := strings.TrimSpace(selection.AttrOr("content", "")); value != "" {
+			values = append(values, value)
+		}
 	})
-	return result
+	return bounded(strings.Join(values, ", "), limit)
 }
 
-func texts(document *goquery.Document, selector string, maxItems, maxLength int) []string {
+func canonical(document *goquery.Document, base *url.URL) (string, int, int) {
+	result, declared, invalid := "", 0, 0
+	document.Find("link").Each(func(_ int, selection *goquery.Selection) {
+		if containsToken(tokenValues(selection.AttrOr("rel", "")), "canonical") {
+			declared++
+			href := strings.TrimSpace(selection.AttrOr("href", ""))
+			if href == "" {
+				invalid++
+				return
+			}
+			if resolved, err := ResolveURL(base.String(), href); err == nil && isHTTPURL(resolved) && result == "" {
+				result = bounded(resolved, 8192)
+			} else if err != nil || !isHTTPURL(resolved) {
+				invalid++
+			}
+		}
+	})
+	return result, declared, invalid
+}
+
+func isHTTPURL(raw string) bool {
+	value, err := url.Parse(raw)
+	return err == nil && value.User == nil && (value.Scheme == "http" || value.Scheme == "https") && value.Hostname() != ""
+}
+
+func headingTexts(document *goquery.Document, labels map[string]string, selector, ariaLevel string, maxItems, maxLength int) []string {
 	values := make([]string, 0)
-	document.Find(selector).EachWithBreak(func(_ int, selection *goquery.Selection) bool {
+	appendValue := func(selection *goquery.Selection) bool {
 		if len(values) >= maxItems {
 			return false
 		}
-		value := bounded(strings.TrimSpace(selection.Text()), maxLength)
+		value := bounded(accessibleText(selection, labels), maxLength)
 		if value != "" {
 			values = append(values, value)
 		}
 		return true
+	}
+	document.Find(selector).EachWithBreak(func(_ int, selection *goquery.Selection) bool {
+		return appendValue(selection)
+	})
+	document.Find("[role][aria-level]").EachWithBreak(func(_ int, selection *goquery.Selection) bool {
+		if goquery.NodeName(selection) == selector ||
+			!containsToken(tokenValues(selection.AttrOr("role", "")), "heading") ||
+			strings.TrimSpace(selection.AttrOr("aria-level", "")) != ariaLevel {
+			return true
+		}
+		return appendValue(selection)
 	})
 	return values
+}
+
+func labelledTextByID(document *goquery.Document) map[string]string {
+	labels := make(map[string]string)
+	document.Find("[id]").Each(func(_ int, selection *goquery.Selection) {
+		id := strings.TrimSpace(selection.AttrOr("id", ""))
+		if id == "" {
+			return
+		}
+		value := strings.TrimSpace(selection.AttrOr("aria-label", ""))
+		if value == "" {
+			value = strings.TrimSpace(selection.Text())
+		}
+		if value != "" {
+			labels[id] = bounded(value, 2048)
+		}
+	})
+	return labels
+}
+
+func accessibleText(selection *goquery.Selection, labels map[string]string) string {
+	labelled := make([]string, 0)
+	for _, id := range strings.Fields(selection.AttrOr("aria-labelledby", "")) {
+		if value := strings.TrimSpace(labels[id]); value != "" {
+			labelled = append(labelled, value)
+		}
+	}
+	if len(labelled) > 0 {
+		return strings.Join(labelled, " ")
+	}
+	if value := strings.TrimSpace(selection.AttrOr("aria-label", "")); value != "" {
+		return value
+	}
+	if value := strings.TrimSpace(selection.Text()); value != "" {
+		return value
+	}
+	if goquery.NodeName(selection) == "img" {
+		if value := strings.TrimSpace(selection.AttrOr("alt", "")); value != "" {
+			return value
+		}
+		return strings.TrimSpace(selection.AttrOr("title", ""))
+	}
+	images := make([]string, 0)
+	selection.Find("img").EachWithBreak(func(_ int, image *goquery.Selection) bool {
+		if len(images) >= 10 {
+			return false
+		}
+		if value := accessibleText(image, labels); value != "" {
+			images = append(images, value)
+		}
+		return true
+	})
+	return strings.Join(images, " ")
+}
+
+func imageNeedsTextAlternative(image *goquery.Selection, labels map[string]string) bool {
+	if _, hidden := image.Attr("hidden"); hidden || strings.EqualFold(strings.TrimSpace(image.AttrOr("aria-hidden", "")), "true") {
+		return false
+	}
+	if accessibleText(image, labels) != "" {
+		return false
+	}
+	role := tokenValues(image.AttrOr("role", ""))
+	if containsToken(role, "none") || containsToken(role, "presentation") {
+		return false
+	}
+	alt, hasAlt := image.Attr("alt")
+	return !hasAlt || alt != ""
 }
 
 func countWords(value string) int {

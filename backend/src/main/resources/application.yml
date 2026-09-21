@@ -87,6 +87,18 @@ weblens:
       max-duration-seconds: ${WEBLENS_SCAN_MAX_DURATION_SECONDS:86400}
       max-redirects: ${WEBLENS_SCAN_MAX_REDIRECTS:5}
       concurrency: ${WEBLENS_SCAN_CONCURRENCY:10000}
+  site-clone:
+    max-pages: ${WEBLENS_SITE_CLONE_MAX_PAGES:100000}
+    max-input-bytes: ${WEBLENS_SITE_CLONE_MAX_INPUT_BYTES:214748364800}
+    max-archive-bytes: ${WEBLENS_SITE_CLONE_MAX_ARCHIVE_BYTES:53687091200}
+    # Control Plane hiện kiểm tra checksum trước khi trả download, vì vậy shard
+    # được chặn ở 256 MiB để không vượt ngân sách bộ nhớ của đường proxy này.
+    max-shard-bytes: ${WEBLENS_SITE_CLONE_MAX_SHARD_BYTES:268435456}
+    page-concurrency: ${WEBLENS_SITE_CLONE_PAGE_CONCURRENCY:4}
+    max-retries-per-page: ${WEBLENS_SITE_CLONE_MAX_RETRIES_PER_PAGE:3}
+    max-duration-seconds: ${WEBLENS_SITE_CLONE_MAX_DURATION_SECONDS:604800}
+    archive-retention-days: ${WEBLENS_SITE_CLONE_ARCHIVE_RETENTION_DAYS:7}
+    metadata-retention-days: ${WEBLENS_SITE_CLONE_METADATA_RETENTION_DAYS:30}
   crawler:
     command-url: ${WEBLENS_CRAWLER_COMMAND_URL:http://localhost:8081/internal/v1/commands/scans}
     report-base-url: ${WEBLENS_CRAWLER_REPORT_BASE_URL:http://localhost:8081}
@@ -98,6 +110,7 @@ weblens:
     dispatch-poll-interval: ${WEBLENS_CRAWLER_DISPATCH_POLL_INTERVAL:PT0.5S}
   capture:
     command-url: ${WEBLENS_CAPTURE_COMMAND_URL:http://localhost:8082/internal/v1/commands/captures}
+    site-clone-command-url: ${WEBLENS_SITE_CLONE_COMMAND_URL:http://localhost:8082/internal/v1/commands/site-clones}
     report-base-url: ${WEBLENS_CAPTURE_REPORT_BASE_URL:http://localhost:8082}
     service-token: ${WEBLENS_SERVICE_TOKEN}
     connect-timeout: ${WEBLENS_CAPTURE_CONNECT_TIMEOUT:PT2S}

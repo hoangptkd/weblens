@@ -14,6 +14,7 @@ import com.weblens.scan.entity.ScanEntity;
 import com.weblens.scan.model.ScanConfiguration;
 import com.weblens.scan.model.ScanStatus;
 import com.weblens.scan.repository.ScanRepository;
+import com.weblens.siteclone.service.SiteCloneScanCoordinator;
 import java.time.Clock;
 import java.time.Instant;
 import java.time.ZoneOffset;
@@ -35,13 +36,19 @@ class ScanEventServiceTest {
     private ScanRepository scans;
     @Mock
     private ControlMessagingRepository messages;
+    @Mock
+    private SiteCloneScanCoordinator siteCloneCoordinator;
 
     private ScanEventService service;
 
     @BeforeEach
     void setUp() {
         service = new ScanEventService(
-                scans, messages, new ObjectMapper(), Clock.fixed(NOW, ZoneOffset.UTC)
+                scans,
+                messages,
+                new ObjectMapper(),
+                Clock.fixed(NOW, ZoneOffset.UTC),
+                siteCloneCoordinator
         );
     }
 

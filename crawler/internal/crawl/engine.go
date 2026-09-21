@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -182,15 +183,26 @@ func buildResult(lease model.PageLease, fetched FetchResult) model.PageResult {
 		result.RedirectCodes = append(result.RedirectCodes, uint16(max(redirect.StatusCode, 0)))
 	}
 	if fetched.ErrorCode != "" {
-		result.FetchOutcome = "FAILED"
-		result.Findings = append(result.Findings, finding(lease.PageID, "fetch.failed", "TECHNICAL", "ERROR", "FETCH_FAILED", "Page fetch failed.", map[string]any{"errorCode": fetched.ErrorCode}))
+		if isCrawlPolicyBlock(fetched.ErrorCode) {
+			result.FetchOutcome = "SKIPPED"
+			result.Findings = append(result.Findings, finding(lease.PageID, "fetch.policy-blocked", 1, "TECHNICAL", "INFO", "FETCH_BLOCKED_BY_POLICY", "Page was not fetched because it was outside the configured crawl safety boundary.", map[string]any{"errorCode": fetched.ErrorCode}))
+		} else {
+			result.FetchOutcome = "FAILED"
+			result.Findings = append(result.Findings, finding(lease.PageID, "fetch.failed", 1, "TECHNICAL", "ERROR", "FETCH_FAILED", "Page fetch failed.", map[string]any{"errorCode": fetched.ErrorCode}))
+		}
 		return result
 	}
 	if fetched.StatusCode >= 400 {
 		result.FetchOutcome = "HTTP_ERROR"
-		result.Findings = append(result.Findings, finding(lease.PageID, "http.error", "TECHNICAL", "ERROR", "HTTP_ERROR", "Page returned an HTTP error status.", map[string]any{"statusCode": fetched.StatusCode}))
+		result.Findings = append(result.Findings, finding(lease.PageID, "http.error", 1, "TECHNICAL", "ERROR", "HTTP_ERROR", "Page returned an HTTP error status.", map[string]any{"statusCode": fetched.StatusCode}))
 	} else {
 		result.FetchOutcome = "SUCCESS"
+	}
+	if fetched.StatusCode >= 300 && fetched.StatusCode < 400 {
+		result.Findings = append(result.Findings, finding(lease.PageID, "http.redirect-response", 1, "TECHNICAL", "WARNING", "HTTP_REDIRECT_RESPONSE", "The final response is still a redirect rather than a content response.", map[string]any{"statusCode": fetched.StatusCode}))
+	}
+	if len(fetched.Redirects) > 1 {
+		result.Findings = append(result.Findings, finding(lease.PageID, "redirect.chain", 1, "SEO", "WARNING", "REDIRECT_CHAIN", "The request followed more than one redirect before reaching the final response.", map[string]any{"redirectCount": len(fetched.Redirects)}))
 	}
 	if !IsHTMLContentType(fetched.ContentType) {
 		return result
@@ -236,27 +248,51 @@ func buildResult(lease model.PageLease, fetched FetchResult) model.PageResult {
 			result.ExternalLinks++
 		}
 	}
-	if data.Title == "" {
-		result.Findings = append(result.Findings, finding(lease.PageID, "title.missing", "CONTENT", "WARNING", "TITLE_MISSING", "Page does not have a title.", nil))
-	}
-	if data.MetaDescription == "" {
-		result.Findings = append(result.Findings, finding(lease.PageID, "meta-description.missing", "CONTENT", "INFO", "META_DESCRIPTION_MISSING", "Page does not have a meta description.", nil))
-	}
-	if len(data.H1) == 0 {
-		result.Findings = append(result.Findings, finding(lease.PageID, "h1.missing", "CONTENT", "WARNING", "H1_MISSING", "Page does not have an H1 heading.", nil))
-	}
-	if data.ImageMissingAltCount > 0 {
-		result.Findings = append(result.Findings, finding(lease.PageID, "image.alt.missing", "CONTENT", "INFO", "IMAGE_ALT_MISSING", "One or more images have no alternative text.", map[string]any{"count": data.ImageMissingAltCount}))
+	if fetched.StatusCode >= 200 && fetched.StatusCode < 300 && len(fetched.Body) > 0 {
+		staticHTML := map[string]any{"source": "static_html"}
+		if data.Title == "" {
+			result.Findings = append(result.Findings, finding(lease.PageID, "title.missing", 2, "CONTENT", "WARNING", "TITLE_MISSING", "The static HTML response does not contain a non-empty title.", staticHTML))
+		}
+		if data.MetaDescription == "" {
+			result.Findings = append(result.Findings, finding(lease.PageID, "meta-description.missing", 2, "CONTENT", "INFO", "META_DESCRIPTION_MISSING", "The static HTML response does not contain a meta description.", staticHTML))
+		}
+		if len(data.H1) == 0 {
+			result.Findings = append(result.Findings, finding(lease.PageID, "h1.missing", 2, "CONTENT", "WARNING", "H1_MISSING", "The static HTML response does not contain a level-one heading with a detectable accessible name.", staticHTML))
+		}
+		if data.ImageMissingAltCount > 0 {
+			result.Findings = append(result.Findings, finding(lease.PageID, "image.alt.missing", 2, "CONTENT", "INFO", "IMAGE_ALT_MISSING", "One or more images in the static HTML have no detectable text alternative and are not marked decorative.", map[string]any{
+				"count": data.ImageMissingAltCount, "sampleOrdinals": data.ImageMissingAltSample, "source": "static_html",
+			}))
+		}
+		if data.CanonicalInvalid > 0 {
+			result.Findings = append(result.Findings, finding(lease.PageID, "canonical.invalid", 1, "SEO", "WARNING", "CANONICAL_INVALID", "One or more canonical link declarations do not contain a valid HTTP(S) URL.", map[string]any{"count": data.CanonicalInvalid, "source": "static_html"}))
+		}
+		if data.CanonicalDeclared > 1 {
+			result.Findings = append(result.Findings, finding(lease.PageID, "canonical.multiple", 1, "SEO", "WARNING", "CANONICAL_MULTIPLE", "The static HTML contains multiple canonical link declarations.", map[string]any{"count": data.CanonicalDeclared, "source": "static_html"}))
+		}
+		if data.CanonicalRelation == "NON_SELF" && (result.IndexabilityReason == "META_ROBOTS_NOINDEX" || result.IndexabilityReason == "X_ROBOTS_TAG_NOINDEX" || result.IndexabilityReason == "META_AND_X_ROBOTS_NOINDEX") {
+			result.Findings = append(result.Findings, finding(lease.PageID, "canonical.noindex-conflict", 1, "SEO", "WARNING", "CANONICAL_NOINDEX_CONFLICT", "The page combines a non-self canonical URL with a noindex directive.", map[string]any{"source": "static_html"}))
+		}
+		if data.HreflangInvalid > 0 {
+			result.Findings = append(result.Findings, finding(lease.PageID, "hreflang.invalid", 1, "SEO", "WARNING", "HREFLANG_INVALID", "One or more alternate hreflang declarations are missing a language or valid HTTP(S) URL.", map[string]any{"count": data.HreflangInvalid, "source": "static_html"}))
+		}
+		if data.SchemaOrgErrorCount > 0 {
+			result.Findings = append(result.Findings, finding(lease.PageID, "structured-data.invalid", 1, "SEO", "WARNING", "STRUCTURED_DATA_INVALID", "The static HTML contains structured data that could not be parsed.", map[string]any{"count": data.SchemaOrgErrorCount, "issueCodes": data.SchemaOrgIssueCodes, "source": "static_html"}))
+		}
 	}
 	return result
 }
 
+func isCrawlPolicyBlock(errorCode string) bool {
+	return errorCode == "ssrf_blocked" || errorCode == "redirect_out_of_scope"
+}
+
 func indexability(statusCode int, metaRobots, xRobotsTag string) (bool, string) {
-	if statusCode < 200 || statusCode >= 400 {
+	if statusCode < 200 || statusCode >= 300 {
 		return false, "HTTP_STATUS_NOT_INDEXABLE"
 	}
-	metaNoindex := strings.Contains(strings.ToLower(metaRobots), "noindex")
-	headerNoindex := strings.Contains(strings.ToLower(xRobotsTag), "noindex")
+	metaNoindex := hasNoindexDirective(metaRobots)
+	headerNoindex := hasGenericXRobotsNoindex(xRobotsTag)
 	if metaNoindex && headerNoindex {
 		return false, "META_AND_X_ROBOTS_NOINDEX"
 	}
@@ -269,6 +305,39 @@ func indexability(statusCode int, metaRobots, xRobotsTag string) (bool, string) 
 	return true, "INDEXABLE"
 }
 
+func hasNoindexDirective(value string) bool {
+	for _, token := range strings.FieldsFunc(strings.ToLower(value), func(character rune) bool {
+		return character == ',' || character == ';' || character == ' ' || character == '\t' || character == '\r' || character == '\n'
+	}) {
+		if token == "noindex" || token == "none" {
+			return true
+		}
+	}
+	return false
+}
+
+func hasGenericXRobotsNoindex(value string) bool {
+	for _, line := range strings.Split(value, "\n") {
+		targeted := false
+		for _, part := range strings.Split(line, ",") {
+			part = strings.TrimSpace(part)
+			prefix, remainder, hasColon := strings.Cut(part, ":")
+			if hasColon {
+				switch strings.ToLower(strings.TrimSpace(prefix)) {
+				case "max-snippet", "max-image-preview", "max-video-preview", "unavailable_after":
+				default:
+					targeted = true
+					part = remainder
+				}
+			}
+			if !targeted && hasNoindexDirective(part) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func durationMillis(value time.Duration) uint32 {
 	if value <= 0 {
 		return 0
@@ -276,13 +345,13 @@ func durationMillis(value time.Duration) uint32 {
 	return uint32(min(value.Milliseconds(), int64(^uint32(0))))
 }
 
-func finding(pageID uuid.UUID, ruleID, category, severity, code, message string, evidence map[string]any) model.Finding {
+func finding(pageID uuid.UUID, ruleID string, ruleVersion uint32, category, severity, code, message string, evidence map[string]any) model.Finding {
 	if evidence == nil {
 		evidence = map[string]any{}
 	}
 	return model.Finding{
-		FindingID: uuid.NewSHA1(pageID, []byte(ruleID+":1")), RuleID: ruleID,
-		RuleVersion: 1, Category: category, Severity: severity, Code: code,
+		FindingID: uuid.NewSHA1(pageID, []byte(ruleID+":"+strconv.FormatUint(uint64(ruleVersion), 10))), RuleID: ruleID,
+		RuleVersion: ruleVersion, Category: category, Severity: severity, Code: code,
 		Message: message, Evidence: evidence,
 	}
 }

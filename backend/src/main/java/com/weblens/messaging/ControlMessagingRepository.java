@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.weblens.messaging.contract.MessageEnvelope;
 import com.weblens.messaging.contract.ScanEventEnvelope;
 import com.weblens.messaging.contract.CaptureEventEnvelope;
+import com.weblens.messaging.contract.SiteCloneEventEnvelope;
 import java.time.Duration;
 import java.time.Instant;
 import java.time.OffsetDateTime;
@@ -141,6 +142,51 @@ public class ControlMessagingRepository {
                 .list();
     }
 
+    @Transactional
+    public List<OutboxRecord> claimSiteClones(UUID workerId, int limit, Duration leaseDuration, Instant now) {
+        if (limit < 1 || limit > 100) {
+            throw new IllegalArgumentException("Outbox claim limit must be between 1 and 100");
+        }
+        return jdbc.sql("""
+                with candidates as (
+                    select message_id
+                    from outbox_events
+                    where aggregate_type = 'SITE_CLONE'
+                      and event_type in ('SITE_CLONE_REQUESTED', 'SITE_CLONE_CANCEL_REQUESTED')
+                      and ((status = 'PENDING' and available_at <= :now)
+                           or (status = 'CLAIMED' and lease_expires_at <= :now))
+                    order by available_at, created_at, message_id
+                    for update skip locked
+                    limit :limit
+                )
+                update outbox_events outbox
+                set status = 'CLAIMED', lease_owner = :workerId,
+                    lease_expires_at = :leaseUntil,
+                    delivery_attempts = delivery_attempts + 1,
+                    last_error_code = case
+                        when outbox.status = 'CLAIMED' then 'LEASE_EXPIRED'
+                        else outbox.last_error_code
+                    end
+                from candidates
+                where outbox.message_id = candidates.message_id
+                returning outbox.message_id, outbox.correlation_id,
+                          outbox.payload::text, outbox.delivery_attempts,
+                          outbox.lease_owner
+                """)
+                .param("now", timestamp(now))
+                .param("limit", limit)
+                .param("workerId", workerId)
+                .param("leaseUntil", timestamp(now.plus(leaseDuration)))
+                .query((resultSet, rowNumber) -> new OutboxRecord(
+                        resultSet.getObject("message_id", UUID.class),
+                        resultSet.getObject("correlation_id", UUID.class),
+                        resultSet.getString("payload"),
+                        resultSet.getInt("delivery_attempts"),
+                        resultSet.getObject("lease_owner", UUID.class)
+                ))
+                .list();
+    }
+
     public boolean complete(OutboxRecord record, Instant now) {
         return jdbc.sql("""
                 update outbox_events
@@ -216,6 +262,36 @@ public class ControlMessagingRepository {
     }
 
     public void insertCaptureInbox(CaptureEventEnvelope envelope, byte[] payloadHash, String outcome, Instant now) {
+        jdbc.sql("""
+                insert into inbox_messages (
+                    message_id, source_service, aggregate_type, aggregate_id,
+                    aggregate_version, message_type, contract_version, correlation_id,
+                    payload_sha256, outcome, received_at, processed_at
+                ) values (
+                    :messageId, 'CAPTURE', :aggregateType, :aggregateId,
+                    :aggregateVersion, :messageType, :contractVersion, :correlationId,
+                    :payloadHash, :outcome, :now, :now
+                )
+                """)
+                .param("messageId", envelope.messageId())
+                .param("aggregateType", envelope.aggregateType())
+                .param("aggregateId", envelope.aggregateId())
+                .param("aggregateVersion", envelope.aggregateVersion())
+                .param("messageType", envelope.messageType())
+                .param("contractVersion", envelope.contractVersion())
+                .param("correlationId", envelope.correlationId())
+                .param("payloadHash", payloadHash)
+                .param("outcome", outcome)
+                .param("now", timestamp(now))
+                .update();
+    }
+
+    public void insertSiteCloneInbox(
+            SiteCloneEventEnvelope envelope,
+            byte[] payloadHash,
+            String outcome,
+            Instant now
+    ) {
         jdbc.sql("""
                 insert into inbox_messages (
                     message_id, source_service, aggregate_type, aggregate_id,

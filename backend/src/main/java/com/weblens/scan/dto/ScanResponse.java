@@ -15,7 +15,6 @@ public record ScanResponse(
         ScanProgressResponse progress,
         EffectiveScanConfigResponse effectiveConfig,
         String collectorVersion,
-        long findingCount,
         TerminalReasonResponse terminalReason
 ) {
 }

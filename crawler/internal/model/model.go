@@ -184,6 +184,7 @@ type ReportPage struct {
 	URL                   string          `json:"url"`
 	FinalURL              string          `json:"finalUrl"`
 	StatusCode            int             `json:"statusCode,omitempty"`
+	ContentType           string          `json:"contentType,omitempty"`
 	Outcome               string          `json:"outcome"`
 	ResponseTimeMS        uint32          `json:"responseTimeMs,omitempty"`
 	ResponseBytes         uint64          `json:"responseBytes,omitempty"`
@@ -230,7 +231,31 @@ type ReportPage struct {
 }
 
 type ScanPagesReport struct {
-	State      ReportState  `json:"state"`
-	Items      []ReportPage `json:"items"`
-	NextCursor string       `json:"nextCursor,omitempty"`
+	State      ReportState       `json:"state"`
+	Summary    ScanReportSummary `json:"summary"`
+	Items      []ReportPage      `json:"items"`
+	NextCursor string            `json:"nextCursor,omitempty"`
+}
+
+type PageFilters struct {
+	IssuesOnly   bool
+	Outcomes     []string
+	StatusMin    *int
+	StatusMax    *int
+	Query        string
+	Indexable    *bool
+	ContentTypes []string
+	Severities   []string
+	FindingCodes []string
+}
+
+type ScanReportSummary struct {
+	TotalURLCount   uint64 `json:"totalUrlCount"`
+	IssuePageCount  uint64 `json:"issuePageCount"`
+	FindingCount    uint64 `json:"findingCount"`
+	Status2xxCount  uint64 `json:"status2xxCount"`
+	Status3xxCount  uint64 `json:"status3xxCount"`
+	Status4xxCount  uint64 `json:"status4xxCount"`
+	Status5xxCount  uint64 `json:"status5xxCount"`
+	NoResponseCount uint64 `json:"noResponseCount"`
 }

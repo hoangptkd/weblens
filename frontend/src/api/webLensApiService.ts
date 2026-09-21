@@ -1,12 +1,29 @@
-import type { Capture, PageSnapshot, Scan, ScanPageRecord, ScanPagesReport, Website } from '../domain/types'
-import type { WebLensService } from '../services/mockWebLensService'
+import type { Capture, PageResult, PageSnapshot, Scan, ScanPageRecord, ScanPagesReport, SiteClone, Website } from '../domain/types'
+import type { WebLensService } from '../services/webLensService'
 import { apiBlobRequest, apiRequest } from './apiClient'
-import type { ApiCapture, ApiCaptureSnapshot, ApiPage, ApiScan, ApiScanPage, ApiScanPages, ApiWebsite } from './contracts'
+import type { ApiCapture, ApiCaptureSnapshot, ApiDashboardSummary, ApiPage, ApiScan, ApiScanPage, ApiScanPages, ApiSiteClone, ApiWebsite } from './contracts'
 
-export const backendWebLensService: WebLensService = {
-  async listWebsites() {
-    const page = await apiRequest<ApiPage<ApiWebsite>>('/api/v1/websites?page=0&size=100&status=ACTIVE&sort=updatedAt,desc')
-    return page.items.map(mapWebsite)
+export const webLensService: WebLensService = {
+  async getDashboardSummary() {
+    return apiRequest<ApiDashboardSummary>('/api/v1/dashboard/summary')
+  },
+
+  async listWebsites(request) {
+    const query = new URLSearchParams({
+      page: String(request.page),
+      size: String(request.size),
+      sort: request.sort ?? 'updatedAt,desc',
+    })
+    appendMany(query, 'status', request.statuses ?? ['ACTIVE'])
+    appendOptional(query, 'q', request.q)
+    appendOptional(query, 'hostname', request.hostname)
+    appendOptional(query, 'createdFrom', request.createdFrom)
+    appendOptional(query, 'createdTo', request.createdTo)
+    appendOptional(query, 'updatedFrom', request.updatedFrom)
+    appendOptional(query, 'updatedTo', request.updatedTo)
+    if (request.hasActiveScan !== undefined) query.set('hasActiveScan', String(request.hasActiveScan))
+    const page = await apiRequest<ApiPage<ApiWebsite>>(`/api/v1/websites?${query}`)
+    return mapPage(page, mapWebsite)
   },
 
   async getWebsite(id) {
@@ -20,9 +37,21 @@ export const backendWebLensService: WebLensService = {
     }))
   },
 
-  async listScans(websiteId) {
-    const page = await apiRequest<ApiPage<ApiScan>>(`/api/v1/websites/${encodeURIComponent(websiteId)}/scans?page=0&size=100`)
-    return page.items.map(mapScan)
+  async listScans(websiteId, request) {
+    const query = new URLSearchParams({
+      page: String(request.page),
+      size: String(request.size),
+      sort: request.sort ?? 'createdAt,desc',
+    })
+    appendMany(query, 'status', request.statuses)
+    appendOptional(query, 'createdFrom', request.createdFrom)
+    appendOptional(query, 'createdTo', request.createdTo)
+    appendOptional(query, 'terminalCode', request.terminalCode)
+    if (request.minFailedPages !== undefined) query.set('minFailedPages', String(request.minFailedPages))
+    const page = await apiRequest<ApiPage<ApiScan>>(
+      `/api/v1/websites/${encodeURIComponent(websiteId)}/scans?${query}`,
+    )
+    return mapPage(page, mapScan)
   },
 
   async getScan(id) {
@@ -42,17 +71,26 @@ export const backendWebLensService: WebLensService = {
     }))
   },
 
-  async listScanPages(scanId, cursor): Promise<ScanPagesReport> {
-		const query = new URLSearchParams({ limit: '200' })
-		if (cursor) query.set('cursor', cursor)
-		const response = await apiRequest<ApiScanPages>(`/api/v1/scans/${encodeURIComponent(scanId)}/pages?${query}`)
+  async listScanPages(scanId, cursor, limit = 200, filters = {}): Promise<ScanPagesReport> {
+    const query = new URLSearchParams({ limit: String(limit), issuesOnly: String(filters.issuesOnly ?? false) })
+    if (cursor) query.set('cursor', cursor)
+    appendMany(query, 'outcome', filters.outcomes)
+    if (filters.statusMin !== undefined) query.set('statusMin', String(filters.statusMin))
+    if (filters.statusMax !== undefined) query.set('statusMax', String(filters.statusMax))
+    appendOptional(query, 'q', filters.q)
+    if (filters.indexable !== undefined) query.set('indexable', String(filters.indexable))
+    appendMany(query, 'contentType', filters.contentTypes)
+    appendMany(query, 'severity', filters.severities)
+    appendMany(query, 'findingCode', filters.findingCodes)
+    const response = await apiRequest<ApiScanPages>(`/api/v1/scans/${encodeURIComponent(scanId)}/pages?${query}`)
     return {
       items: response.items.map(mapScanPage),
+      summary: response.summary,
       analyticsExpectedCount: response.analyticsExpectedCount,
       analyticsPublishedCount: response.analyticsPublishedCount,
       analyticsWatermark: response.analyticsWatermark ? formatInstant(response.analyticsWatermark) : null,
       fresh: response.fresh,
-			nextCursor: response.nextCursor ?? undefined,
+      nextCursor: response.nextCursor ?? undefined,
     }
   },
 
@@ -114,6 +152,70 @@ export const backendWebLensService: WebLensService = {
       `/api/v1/reconstructions/${encodeURIComponent(reconstructionId)}/artifacts/archive`,
     )
   },
+
+  async listSiteClones(request) {
+    const query = new URLSearchParams({
+      page: String(request.page),
+      size: String(request.size),
+      sort: request.sort ?? 'createdAt,desc',
+    })
+    appendMany(query, 'status', request.statuses)
+    appendOptional(query, 'q', request.q)
+    appendOptional(query, 'createdFrom', request.createdFrom)
+    appendOptional(query, 'createdTo', request.createdTo)
+    appendOptional(query, 'terminalCode', request.terminalCode)
+    const page = await apiRequest<ApiPage<ApiSiteClone>>(`/api/v1/site-clones?${query}`)
+    return mapPage(page, mapSiteClone)
+  },
+
+  async startSiteClone(url, idempotencyKey): Promise<SiteClone> {
+    return mapSiteClone(await apiRequest<ApiSiteClone>('/api/v1/site-clones', {
+      method: 'POST',
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify({ url }),
+    }))
+  },
+
+  async getSiteClone(siteCloneId): Promise<SiteClone> {
+    return mapSiteClone(await apiRequest<ApiSiteClone>(`/api/v1/site-clones/${encodeURIComponent(siteCloneId)}`))
+  },
+
+  async getSiteCloneProgress(siteCloneId, filters) {
+    const query = new URLSearchParams({ after: String(filters.after), limit: '50', status: filters.status, q: filters.q })
+    return apiRequest<import('../domain/types').SiteCloneProgress>(`/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/progress?${query}`)
+  },
+
+  async cancelSiteClone(siteCloneId): Promise<SiteClone> {
+    return mapSiteClone(await apiRequest<ApiSiteClone>(
+      `/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/cancellations`,
+      { method: 'POST' },
+    ))
+  },
+
+  async getSiteCloneArtifact(siteCloneId, artifactId): Promise<Blob> {
+    return apiBlobRequest(
+      `/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/artifacts/${encodeURIComponent(artifactId)}`,
+    )
+  },
+}
+
+function appendOptional(query: URLSearchParams, name: string, value?: string) {
+  const normalized = value?.trim()
+  if (normalized) query.set(name, normalized)
+}
+
+function appendMany(query: URLSearchParams, name: string, values?: string[]) {
+  values?.forEach((value) => query.append(name, value))
+}
+
+function mapPage<S, T>(source: ApiPage<S>, mapper: (item: S) => T): PageResult<T> {
+  return {
+    items: source.items.map(mapper),
+    page: source.page,
+    size: source.size,
+    totalItems: source.totalItems,
+    totalPages: source.totalPages,
+  }
 }
 
 function mapScanPage(source: ApiScanPage): ScanPageRecord {
@@ -176,7 +278,7 @@ function mapWebsite(source: ApiWebsite): Website {
     latestStatus: source.latestScan?.status,
     updatedAt: formatInstant(source.updatedAt),
     pageCount: source.pageCount,
-    findingCount: source.findingCount,
+    failedPageCount: source.failedPageCount,
   }
 }
 
@@ -190,7 +292,6 @@ function mapScan(source: ApiScan): Scan {
     finishedAt: source.finishedAt ? formatInstant(source.finishedAt) : undefined,
     duration: formatDuration(source.durationMs),
     progress: source.progress,
-    findingCount: source.findingCount,
     collectorVersion: source.collectorVersion,
     effectiveConfig: source.effectiveConfig,
     terminalReason: source.terminalReason ?? undefined,
@@ -227,5 +328,30 @@ function mapCapture(source: ApiCapture): Capture {
     terminalCode: source.terminalCode ?? undefined,
     terminalMessage: source.terminalMessage ?? undefined,
     createdAt: formatInstant(source.createdAt),
+  }
+}
+
+function mapSiteClone(source: ApiSiteClone): SiteClone {
+  return {
+    id: source.id,
+    websiteId: source.websiteId ?? undefined,
+    scanId: source.scanId,
+    targetUrl: source.targetUrl,
+    status: source.status,
+    discoveredCount: source.discoveredCount,
+    processedCount: source.processedCount,
+    succeededCount: source.succeededCount,
+    failedCount: source.failedCount,
+    artifactCount: source.artifactCount,
+    totalArchiveBytes: source.totalArchiveBytes,
+    terminalCode: source.terminalCode ?? undefined,
+    terminalMessage: source.terminalMessage ?? undefined,
+    createdAt: formatInstant(source.createdAt),
+    startedAt: source.startedAt ? formatInstant(source.startedAt) : undefined,
+    finishedAt: source.finishedAt ? formatInstant(source.finishedAt) : undefined,
+    artifacts: source.artifacts.map((artifact) => ({
+      ...artifact,
+      expiresAt: formatInstant(artifact.expiresAt),
+    })),
   }
 }

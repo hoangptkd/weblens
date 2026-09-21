@@ -10,7 +10,9 @@ import com.weblens.scan.client.CrawlerPageContract;
 import com.weblens.scan.client.CrawlerReportClient;
 import com.weblens.scan.client.CrawlerReportStateContract;
 import com.weblens.scan.client.CrawlerScanPagesContract;
+import com.weblens.scan.client.CrawlerScanSummaryContract;
 import com.weblens.scan.entity.ScanEntity;
+import com.weblens.scan.dto.ScanPageFilter;
 import com.weblens.scan.model.ScanConfiguration;
 import com.weblens.scan.repository.ScanRepository;
 import java.time.Instant;
@@ -52,8 +54,10 @@ class ScanReportServiceTest {
                 new ScanConfiguration(25, 3, 10_485_760, 120, 5, 3),
                 "crawler-v1", null, null, observedAt.minusSeconds(10)
         )));
-        given(crawler.listPages(ownerId, scanId, 100, null)).willReturn(new CrawlerScanPagesContract(
+        ScanPageFilter filter = new ScanPageFilter(false, List.of(), null, null, null, null, List.of(), List.of(), List.of());
+        given(crawler.listPages(ownerId, scanId, 100, null, filter)).willReturn(new CrawlerScanPagesContract(
                 new CrawlerReportStateContract(scanId, ownerId, "COMPLETED", 1, 1, observedAt),
+                new CrawlerScanSummaryContract(245, 17, 23, 220, 5, 10, 3, 7),
                 List.of(new CrawlerPageContract(
                         pageId, scanId, "https://example.com/docs", "https://example.com/docs",
                         200, "SUCCESS", 125L, 2048L, "Docs", List.of("Overview"),
@@ -64,9 +68,12 @@ class ScanReportServiceTest {
                 ))
         ));
 
-        var response = service.listPages(ownerId, scanId, 100, null);
+        var response = service.listPages(ownerId, scanId, 100, null, filter);
 
         assertThat(response.fresh()).isTrue();
+        assertThat(response.summary().totalUrlCount()).isEqualTo(245);
+        assertThat(response.summary().issuePageCount()).isEqualTo(17);
+        assertThat(response.summary().findingCount()).isEqualTo(23);
         assertThat(response.items()).singleElement().satisfies(page -> {
             assertThat(page.path()).isEqualTo("/docs");
             assertThat(page.outcome()).isEqualTo("success");

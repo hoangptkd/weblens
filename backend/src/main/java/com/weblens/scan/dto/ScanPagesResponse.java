@@ -5,6 +5,7 @@ import java.util.List;
 
 public record ScanPagesResponse(
         List<ScanPageResponse> items,
+        ScanReportSummaryResponse summary,
         int analyticsExpectedCount,
         int analyticsPublishedCount,
         Instant analyticsWatermark,

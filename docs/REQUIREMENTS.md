@@ -97,7 +97,7 @@ batch, version đến sai thứ tự, `too many parts`, disk pressure, retention
 
 **Description:** A user can view scan summary, page outcomes, collected metrics, and findings.
 
-**Acceptance criteria:** Results are authorized, paginated where needed, label missing/failed measurements, and include enough collection context to interpret values.
+**Acceptance criteria:** Results are authorized, paginated where needed, label missing/failed measurements, and include enough collection context to interpret values. Pagination only bounds the returned rows: total URL, issue-page, finding and HTTP-distribution counts shown as scan-wide totals must be calculated over the full authorized analytical projection, never inferred from the current page length. An issue page is a failed HTTP/fetch outcome or has at least one `ERROR`/`WARNING` finding; `INFO` findings and policy-skipped pages remain visible evidence but do not make a page an issue.
 
 **Important edge cases:** Partial scans, deleted website, measurement-version changes, no successful pages.
 
@@ -142,6 +142,56 @@ không preview hay thực thi HTML/JavaScript trong archive.
 Windows, collision, CSS URL tương đối, `srcset`, external origin, body hết budget,
 worker mất lease, upload thành công nhưng commit thất bại, object hết hạn hoặc bị
 thay đổi và capture cũ chưa có reconstruction.
+
+## CAP-005 — Tạo và tải Design Clone của website
+
+**Trạng thái:** Baseline workload/database đã được duyệt và runtime đã triển khai
+theo ADR-007 revision 2; benchmark capacity và E2E hạ tầng thật vẫn bắt buộc trước
+khi tuyên bố production-ready.
+
+**Mô tả:** Owner nhập URL gốc để yêu cầu một site archive bất đồng bộ. Control
+Plane validate/normalize URL, resolve website thuộc owner và tự tạo một scan mới;
+Crawler khám phá tập page, sau đó Capture Worker loại locale/query/canonical và
+non-HTML, phân loại semantic role + route template, chỉ browser-render ứng viên
+đại diện, deduplicate theo layout fingerprint và asset SHA-256 cùng kiểu biểu diễn
+trình duyệt, rewrite internal navigation rồi công bố archive cùng manifest.
+`scan_id` là correlation nội bộ,
+không phải lựa chọn bắt buộc của user. Design Clone không tạo screenshot và không
+được mô tả như một bản backup đầy đủ nội dung website.
+
+**Tiêu chí chấp nhận:** Một request idempotent với cùng owner, URL và idempotency
+key không tạo trùng scan/site-clone; request được persist trước khi trả accepted;
+scan mới luôn được tạo cho request mới thay vì tái sử dụng ngầm latest scan; page
+work resume được sau restart; progress/cancellation/partial/failure rõ ràng;
+stale worker không publish; login/register/forgot-password không bị gộp; chỉ locale
+của URL gốc và resource đúng policy được đóng gói; URL bị loại có reason code;
+progress phân biệt discovered/rendered/packaged; archive owner-scoped,
+download-only và kiểm tra size/SHA-256; hard ceiling về page, file, byte, thời gian
+và concurrency luôn được cưỡng chế; staging object có lifecycle dự phòng 24 giờ;
+clone một trang cũ tiếp tục tương thích.
+
+Render monitor đọc snapshot owner-scoped của Capture Worker qua Control Plane:
+phase thật (kể cả INGESTING), số trang theo trạng thái, tối đa 32 page đang giữ
+lease và danh sách keyset theo ordinal (50 dòng mặc định, tối đa 100). Thanh tiến
+độ chỉ đo ứng viên đã xử lý (thành công + lỗi), loại URL CANCELLED khỏi mẫu số;
+không đưa phần trăm giả khi ingestion chưa kết thúc hoặc chưa có ứng viên.
+Render 100% không đồng nghĩa archive đã publish; PARTIAL/FAILED/CANCELLED phải
+hiển thị rõ. Retry/lease hết hạn, thời điểm snapshot và lỗi polling phải được
+phân biệt. Danh sách là trạng thái hiện tại, không phải lịch sử event.
+Chẩn đoán sao chép gồm jobId/scanId/correlationId/pageId/attempt và mã lỗi;
+không trả storage key, credential, query value hoặc raw log/HTML. Không thêm
+schema hoặc dịch vụ log cho chức năng theo dõi này.
+
+**Trường hợp biên:** Scan 100.000 page, report chưa fresh, duplicate target batch,
+canonical/query variants, page thay đổi trong lúc job chạy, browser crash, retry,
+cancel, asset chung khác nội dung, redirect/external CDN, disk/MinIO pressure,
+orphan object, archive partial/expired và internal link tới page thất bại.
+
+**Baseline đã chốt:** tối đa 100.000 page, 200 GiB input, 50 GiB archive, shard
+256 MiB, tối đa 4 page/job và 2 page/process theo cấu hình mặc định, retry 3 lần,
+thời gian job 7 ngày, archive 7 ngày, metadata 30 ngày, chỉ same-origin. Có ít
+nhất một page thành công thì cancellation/lỗi phần còn lại có thể phát hành
+`PARTIAL`; không có page thành công thì `FAILED` hoặc `CANCELLED`.
 
 ## Deferred requirements
 

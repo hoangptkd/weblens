@@ -5,11 +5,13 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"net"
 	"net/url"
 	"sort"
 	"strings"
@@ -33,6 +35,7 @@ type Options struct {
 	Database string
 	Username string
 	Password string
+	Secure   bool
 }
 
 func Open(ctx context.Context, options Options) (*Sink, error) {
@@ -80,13 +83,21 @@ func openConnection(options Options, database string) (driver.Conn, error) {
 	if strings.TrimSpace(options.Address) == "" || strings.TrimSpace(database) == "" {
 		return nil, errors.New("ClickHouse address and database are required")
 	}
-	return clickhouseDriver.Open(&clickhouseDriver.Options{
+	connectionOptions := &clickhouseDriver.Options{
 		Addr:        []string{options.Address},
 		Auth:        clickhouseDriver.Auth{Database: database, Username: options.Username, Password: options.Password},
 		DialTimeout: 5 * time.Second, MaxOpenConns: 10, MaxIdleConns: 5,
 		ConnMaxLifetime: 30 * time.Minute,
 		Compression:     &clickhouseDriver.Compression{Method: clickhouseDriver.CompressionLZ4},
-	})
+	}
+	if options.Secure {
+		serverName, _, err := net.SplitHostPort(options.Address)
+		if err != nil {
+			return nil, fmt.Errorf("secure ClickHouse address must include a port: %w", err)
+		}
+		connectionOptions.TLS = &tls.Config{MinVersion: tls.VersionTLS12, ServerName: serverName}
+	}
+	return clickhouseDriver.Open(connectionOptions)
 }
 
 func splitStatements(script string) []string {

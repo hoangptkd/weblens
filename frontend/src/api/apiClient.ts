@@ -1,12 +1,28 @@
 import type { ApiAuthSession, ApiFieldError, ApiProblemDetail } from './contracts'
 
-const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL ?? 'http://localhost:8080'
-const apiBaseUrl = configuredBaseUrl.replace(/\/$/, '')
+const configuredBaseUrl = import.meta.env.VITE_API_BASE_URL ?? ''
+const apiBaseUrl = resolveApiBaseUrl(configuredBaseUrl)
 const csrfCookieName = 'XSRF-TOKEN'
 const csrfHeaderName = 'X-XSRF-TOKEN'
 
 let accessToken: string | null = null
 let refreshInFlight: Promise<boolean> | null = null
+
+export function resolveApiBaseUrl(configured: string, pageHostname = window.location.hostname): string {
+  const normalized = configured.replace(/\/$/, '')
+  if (!normalized) return ''
+  try {
+    const url = new URL(normalized)
+    if (isLoopback(url.hostname) && isLoopback(pageHostname)) url.hostname = pageHostname
+    return url.toString().replace(/\/$/, '')
+  } catch {
+    return normalized
+  }
+}
+
+function isLoopback(hostname: string) {
+  return hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '[::1]'
+}
 
 export class ApiError extends Error {
   readonly code: string
@@ -26,6 +42,10 @@ export class ApiError extends Error {
 
 export function setAccessToken(token: string | null) {
   accessToken = token
+}
+
+export function restoreAccessToken(): Promise<boolean> {
+  return accessToken ? Promise.resolve(true) : refreshAccessToken()
 }
 
 export async function apiRequest<T>(path: string, init: RequestInit = {}): Promise<T> {

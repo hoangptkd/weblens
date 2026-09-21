@@ -12,7 +12,7 @@ public record WebsiteResponse(
         WebsiteStatus status,
         LatestScanResponse latestScan,
         long pageCount,
-        long findingCount,
+        long failedPageCount,
         Instant createdAt,
         Instant updatedAt
 ) {

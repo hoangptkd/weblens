@@ -1,0 +1,12 @@
+<service>
+  <id>WebLensCaddy</id>
+  <name>WebLens Caddy</name>
+  <description>WebLens HTTPS entry point and static frontend</description>
+  <executable>powershell.exe</executable>
+  <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\WebLens\current\infra\production-windows\run-service.ps1 caddy</arguments>
+  <startmode>Automatic</startmode>
+  <stoptimeout>30sec</stoptimeout>
+  <onfailure action="restart" delay="10 sec" />
+  <logpath>C:\ProgramData\WebLens\logs</logpath>
+  <log mode="roll-by-size"><sizeThreshold>10240</sizeThreshold><keepFiles>5</keepFiles></log>
+</service>

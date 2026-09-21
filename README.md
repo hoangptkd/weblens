@@ -12,8 +12,8 @@ Page-report query đi qua Control Plane với owner scope và ingestion watermar
 Browser capture V1.5 đã có Playwright Worker cô lập, PostgreSQL workflow,
 ClickHouse analytics, MinIO artifact và snapshot viewer có owner scope. Mỗi
 capture mới còn tạo best-effort một ZIP clone tĩnh một trang theo Pagesource
-adapter, kèm manifest và thời hạn tải 7 ngày. Frontend tiếp tục mặc định chạy mock
-để demo có thể xem độc lập.
+adapter, kèm manifest và thời hạn tải 7 ngày. Frontend chỉ dùng Control Plane API;
+runtime không còn mock mode hoặc dữ liệu scan mô phỏng.
 
 ## V1 goal
 
@@ -26,7 +26,7 @@ Kiến trúc được duyệt trong [ADR-005](docs/adr/ADR-005-tach-crawler-than
 ## Repository structure
 
 - `backend/`: Spring Boot foundation đang được chuyển thành Control Plane và migration Flyway thuộc ownership của service này
-- `frontend/`: React/TypeScript frontend demo
+- `frontend/`: React/TypeScript product frontend dùng Control Plane API
 - `crawler/`: deployable Go mang giấy phép AGPL-3.0, provenance CrawlObserver và migration thuộc Crawler
 - `capture-worker/`: Playwright/TypeScript deployable, migration PostgreSQL và ClickHouse thuộc ownership của Capture Worker
 - `infra/`: ba PostgreSQL workflow database, ClickHouse, MinIO và Capture Worker local bằng Compose
@@ -48,11 +48,11 @@ npm run preview -- --host 127.0.0.1 --port 5173
 
 Các lệnh kiểm tra: `npm run lint`, `npm test`, `npm run build`.
 
-Mặc định frontend dùng mock service. Để production build dùng auth, website, scan
-và page report thật, sao chép `frontend/.env.example` thành
-`frontend/.env.production.local`, đặt
-`VITE_API_MODE=backend` và giữ `VITE_API_BASE_URL=http://localhost:8080`. Chế độ
-này dùng API thật cho auth, website, scan, page report và browser capture V1.5.
+Frontend luôn dùng API thật cho auth, website, scan, page report và browser
+capture V1.5. Sao chép `frontend/.env.example` thành
+`frontend/.env.production.local` và đặt `VITE_API_BASE_URL` tới Control Plane.
+Danh sách website và lịch sử scan dùng page-number pagination; page evidence dùng
+cursor pagination để duyệt ổn định tập kết quả lớn.
 
 Clone tĩnh chỉ đóng gói HTML sau render cùng CSS, JavaScript, image và font
 same-origin thực sự đã capture. Đây không phải source project gốc và không khôi
@@ -96,6 +96,13 @@ Capture Worker tự áp dụng migration thuộc database của nó khi khởi �
 clone chạy theo `CAPTURE_RECONSTRUCTION_GC_POLL_MS`: artifact upload đã stage
 nhưng không publish được sẽ được dọn sau một giờ; archive đã publish hết hạn sau
 7 ngày sẽ bị xóa khỏi MinIO và chuyển lifecycle sang `EXPIRED`/`DELETED`.
+
+Clone toàn website nhận duy nhất URL từ UI. Control Plane tự tạo website nếu cần,
+tạo một scan mới và chỉ dispatch Capture Worker khi Crawler đã terminal với ít
+nhất một page thành công. Baseline có thể cấu hình qua `WEBLENS_SITE_CLONE_*`:
+100.000 page, 200 GiB input, 50 GiB archive, shard 256 MiB, 4 page/job, retry 3,
+deadline 7 ngày và retention archive 7 ngày. `CAPTURE_SITE_CLONE_CONCURRENCY`
+giới hạn Chromium page worker toàn process; không đặt bằng crawler HTTP concurrency.
 
 Các lệnh kiểm tra Capture Worker:
 

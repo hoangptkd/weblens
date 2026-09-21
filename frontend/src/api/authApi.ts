@@ -1,4 +1,4 @@
-import { apiRequest, setAccessToken } from './apiClient'
+import { apiRequest, restoreAccessToken, setAccessToken } from './apiClient'
 import type { ApiAuthSession, ApiUser } from './contracts'
 
 export const authApi = {
@@ -21,6 +21,11 @@ export const authApi = {
   },
 
   me(): Promise<ApiUser> {
+    return apiRequest<ApiUser>('/api/v1/me')
+  },
+
+  async restore(): Promise<ApiUser> {
+    if (!await restoreAccessToken()) throw new Error('Phiên đăng nhập đã hết hạn.')
     return apiRequest<ApiUser>('/api/v1/me')
   },
 

@@ -5,6 +5,7 @@ import { test } from 'node:test'
 import type { AddressInfo } from 'node:net'
 import type { Config } from './config.js'
 import type { CaptureDatabase } from './database.js'
+import type { SiteCloneDatabase } from './site-database.js'
 import { startServer } from './server.js'
 
 const token = 'capture-worker-test-token-at-least-32-bytes'
@@ -12,12 +13,15 @@ const ownerId = '11111111-1111-1111-1111-111111111111'
 const captureId = '22222222-2222-2222-2222-222222222222'
 const resourceId = '33333333-3333-3333-3333-333333333333'
 const reconstructionId = '44444444-4444-4444-4444-444444444444'
+const siteArtifactId = '55555555-5555-5555-5555-555555555555'
 
 test('chỉ trả artifact qua service token, owner scope và kiểm tra integrity', async () => {
   const screenshot = Buffer.from([0xff, 0xd8, 0xff, 0xd9])
   const resource = Buffer.from('<script>untrusted()</script>', 'utf8')
   const archive = Buffer.from('PK\u0003\u0004static-clone', 'binary')
+  const siteArchive = Buffer.from('PK\u0003\u0004site-clone', 'binary')
   const expiresAt = new Date(Date.now() + 60_000)
+  const artifactCreatedAt = new Date('2026-09-21T10:21:00.123Z')
   let corruptResource = false
   let archiveState: 'PUBLISHED' | 'DELETE_PENDING' = 'PUBLISHED'
   const database = {
@@ -80,18 +84,56 @@ test('chỉ trả artifact qua service token, owner scope và kiểm tra integri
       assert.equal(bucket, 'captures')
       if (key === 'owner/capture/screenshot.jpg') return screenshot
       if (key === 'owner/capture/clone.zip') return archive
+      if (key === 'owner/site-clone/archive.zip') return siteArchive
       assert.equal(key, 'owner/capture/resource.bin')
       return corruptResource ? Buffer.from('corrupt', 'utf8') : resource
     },
   }
-  const server = startServer(config(), database, analytics, storage)
+  const siteDatabase: Pick<SiteCloneDatabase, 'acceptCommand' | 'getReport' | 'getArtifact' | 'getProgress'> = {
+    acceptCommand: async () => false, getReport: async () => null,
+    getArtifact: async (owner, job, artifact) => owner === ownerId && job === captureId && artifact === siteArtifactId
+      ? {
+          id: siteArtifactId, createdAt: artifactCreatedAt, kind: 'ARCHIVE_SHARD', shardNumber: 1,
+          logicalFilename: 'weblens-site-clone.part-0001.zip', bucket: 'captures',
+          key: 'owner/site-clone/archive.zip', contentType: 'application/zip', bytes: siteArchive.length,
+          sha256Hex: createHash('sha256').update(siteArchive).digest('hex'), expiresAt, state: 'PUBLISHED',
+        }
+      : null,
+    getProgress: async (owner, id, after, limit, status, q) => {
+      if (owner !== ownerId) return null
+      assert.equal(id, captureId)
+      assert.equal(after, 12); assert.equal(limit, 20); assert.equal(status, 'FAILED'); assert.equal(q, '/about')
+      return { available: true, jobId: id, scanId: resourceId, correlationId: reconstructionId,
+        phase: 'RUNNING', ingestionComplete: true, observedAt: new Date(), updatedAt: new Date(),
+        startedAt: new Date(), finishedAt: null, phaseAttemptCount: 0, phaseRetryAt: new Date(),
+        phaseLeaseExpired: false, terminalCode: null,
+        counts: { QUEUED: 0, RENDERING: 0, SUCCEEDED: 1, FAILED: 1, CANCELLED: 0 }, activePages: [], items: [], nextAfter: null }
+    },
+  }
+  const server = startServer(config(), database, analytics, storage, siteDatabase)
   await once(server, 'listening')
   const port = (server.address() as AddressInfo).port
   const path = `/internal/v1/reports/captures/${captureId}/artifacts/screenshot?ownerId=${ownerId}`
 
   try {
+    const progressPath = `/internal/v1/reports/site-clones/${captureId}/progress?ownerId=${ownerId}&after=12&limit=20&status=FAILED&q=%2Fabout`
+    assert.equal((await fetch(`http://127.0.0.1:${port}${progressPath}`)).status, 401)
+    const progressResponse = await fetch(`http://127.0.0.1:${port}${progressPath}`, { headers: { 'X-WebLens-Service-Token': token } })
+    assert.equal(progressResponse.status, 200)
+    assert.equal(progressResponse.headers.get('cache-control'), 'no-store')
+    const progressBody = await progressResponse.json() as { phase: string; counts: { FAILED: number } }
+    assert.equal(progressBody.phase, 'RUNNING'); assert.equal(progressBody.counts.FAILED, 1)
+    assert.equal((await fetch(`http://127.0.0.1:${port}${progressPath.replace(ownerId, resourceId)}`,
+      { headers: { 'X-WebLens-Service-Token': token } })).status, 404)
+    assert.equal((await fetch(`http://127.0.0.1:${port}${progressPath.replace(ownerId, 'invalid')}`,
+      { headers: { 'X-WebLens-Service-Token': token } })).status, 400)
     const unauthorized = await fetch(`http://127.0.0.1:${port}${path}`)
     assert.equal(unauthorized.status, 401)
+    assert.equal(unauthorized.headers.get('content-type'), 'application/problem+json')
+    const unauthorizedProblem = await unauthorized.json() as Record<string, unknown>
+    assert.equal(unauthorizedProblem['code'], 'SERVICE_AUTHENTICATION_REQUIRED')
+    assert.equal(unauthorizedProblem['instance'], path.split('?', 1)[0])
+    assert.equal(unauthorizedProblem['correlationId'], unauthorized.headers.get('x-correlation-id'))
 
     const response = await fetch(`http://127.0.0.1:${port}${path}`, {
       headers: { 'X-WebLens-Service-Token': token },
@@ -111,6 +153,17 @@ test('chỉ trả artifact qua service token, owner scope và kiểm tra integri
     assert.equal(resourceResponse.headers.get('cache-control'), 'no-store')
     assert.equal(resourceResponse.headers.get('x-content-type-options'), 'nosniff')
     assert.deepEqual(Buffer.from(await resourceResponse.arrayBuffer()), resource)
+
+    const siteArchiveResponse = await fetch(
+      `http://127.0.0.1:${port}/internal/v1/reports/site-clones/${captureId}/artifacts/${siteArtifactId}?ownerId=${ownerId}`,
+      { headers: { 'X-WebLens-Service-Token': token } },
+    )
+    assert.equal(siteArchiveResponse.status, 200)
+    assert.equal(
+      siteArchiveResponse.headers.get('content-disposition'),
+      'attachment; filename="weblens-site-clone-20260921T102100123Z-55555555.part-0001.zip"',
+    )
+    assert.deepEqual(Buffer.from(await siteArchiveResponse.arrayBuffer()), siteArchive)
 
     const reconstructionResponse = await fetch(
       `http://127.0.0.1:${port}/internal/v1/reports/captures/${captureId}/reconstruction?ownerId=${ownerId}`,
@@ -176,6 +229,7 @@ test('chỉ trả artifact qua service token, owner scope và kiểm tra integri
 
 function config(): Config {
   return {
+    host: '127.0.0.1',
     port: 0,
     serviceToken: token,
     databaseUrl: 'postgresql://unused',
@@ -189,10 +243,15 @@ function config(): Config {
     s3SecretKey: 'unused',
     s3Bucket: 'captures',
     controlEventUrl: 'http://unused',
+    controlSiteCloneEventUrl: 'http://unused',
+    crawlerReportBaseUrl: 'http://unused',
     concurrency: 1,
     workerPollMillis: 100,
     analyticsPollMillis: 100,
     eventPollMillis: 100,
     reconstructionGcPollMillis: 1_000,
+    siteCloneConcurrency: 1,
+    siteClonePollMillis: 100,
+    migrateClickHouseOnStart: true,
   }
 }

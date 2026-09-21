@@ -11,14 +11,19 @@ import io.swagger.v3.oas.annotations.security.SecurityRequirement;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Size;
 import jakarta.servlet.http.HttpServletRequest;
 import java.net.URI;
+import java.time.Instant;
+import java.util.List;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.validation.annotation.Validated;
+import org.springframework.format.annotation.DateTimeFormat;
+import com.weblens.scan.model.ScanStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -66,9 +71,21 @@ public class ScanController {
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID websiteId,
             @RequestParam(defaultValue = "0") @Min(0) int page,
-            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
+            @RequestParam(name = "status", required = false) List<ScanStatus> statuses,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant createdFrom,
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant createdTo,
+            @RequestParam(required = false) @Size(max = 64) String terminalCode,
+            @RequestParam(required = false) @Min(0) Integer minFailedPages,
+            @RequestParam(defaultValue = "createdAt,desc") String sort
     ) {
-        return scans.list(AuthenticatedUserId.from(jwt), websiteId, page, size);
+        return scans.list(
+                AuthenticatedUserId.from(jwt),
+                websiteId,
+                page,
+                size,
+                new ScanService.ListFilter(statuses, createdFrom, createdTo, terminalCode, minFailedPages, sort)
+        );
     }
 
     @GetMapping("/scans/{scanId}")

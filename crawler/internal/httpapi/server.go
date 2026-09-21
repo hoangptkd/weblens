@@ -7,9 +7,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -23,6 +26,8 @@ import (
 
 const maxCommandBody = 64 * 1024
 
+var correlationIDPattern = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
 type commandStore interface {
 	AcceptCommand(context.Context, contracts.ScanCommandEnvelope) (bool, error)
 	AcceptCancellation(context.Context, contracts.ScanCancelCommandEnvelope) (bool, error)
@@ -31,7 +36,8 @@ type commandStore interface {
 }
 
 type reportReader interface {
-	ListPages(context.Context, uuid.UUID, uuid.UUID, int, string, uuid.UUID) ([]model.ReportPage, bool, error)
+	ListPages(context.Context, uuid.UUID, uuid.UUID, int, string, uuid.UUID, model.PageFilters) ([]model.ReportPage, bool, error)
+	ScanSummary(context.Context, uuid.UUID, uuid.UUID) (model.ScanReportSummary, error)
 	GetPage(context.Context, uuid.UUID, uuid.UUID) (model.ReportPage, error)
 }
 
@@ -56,46 +62,192 @@ func NewServer(store commandStore, reports reportReader, serviceToken string, lo
 func (s *Server) listPages(response http.ResponseWriter, request *http.Request) {
 	ownerID, err := uuid.Parse(request.URL.Query().Get("ownerId"))
 	if err != nil {
-		writeProblem(response, http.StatusBadRequest, "INVALID_OWNER_ID", "ownerId must be a UUID.")
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_OWNER_ID", "ownerId must be a UUID.")
 		return
 	}
 	scanID, err := uuid.Parse(request.PathValue("scanId"))
 	if err != nil {
-		writeProblem(response, http.StatusBadRequest, "INVALID_SCAN_ID", "scanId must be a UUID.")
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_SCAN_ID", "scanId must be a UUID.")
 		return
 	}
 	state, err := s.store.GetReportState(request.Context(), ownerID, scanID)
 	if errors.Is(err, postgres.ErrReportNotFound) {
-		writeProblem(response, http.StatusNotFound, "REPORT_NOT_FOUND", "The scan report does not exist.")
+		writeProblem(response, request, http.StatusNotFound, "REPORT_NOT_FOUND", "The scan report does not exist.")
 		return
 	}
 	if err != nil {
 		s.logger.Error("read report state failed", "scanId", scanID, "error", err)
-		writeProblem(response, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The scan report is temporarily unavailable.")
+		writeProblem(response, request, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The scan report is temporarily unavailable.")
 		return
 	}
 	limit, cursor, err := pageQuery(request)
 	if err != nil {
-		writeProblem(response, http.StatusBadRequest, "INVALID_PAGE_CURSOR", err.Error())
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_PAGE_CURSOR", err.Error())
 		return
 	}
-	pages, hasMore, err := s.reports.ListPages(request.Context(), ownerID, scanID, limit, cursor.URL, cursor.ID)
+	filters, err := pageFiltersQuery(request)
+	if err != nil {
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_PAGE_FILTER", err.Error())
+		return
+	}
+	fingerprint := filterFingerprint(filters)
+	if cursor.URL != "" && cursor.Filter != fingerprint {
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_PAGE_CURSOR", "cursor does not match the active filters")
+		return
+	}
+	pages, hasMore, err := s.reports.ListPages(request.Context(), ownerID, scanID, limit, cursor.URL, cursor.ID, filters)
 	if err != nil {
 		s.logger.Error("read page report failed", "scanId", scanID, "error", err)
-		writeProblem(response, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The scan report is temporarily unavailable.")
+		writeProblem(response, request, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The scan report is temporarily unavailable.")
+		return
+	}
+	summary, err := s.reports.ScanSummary(request.Context(), ownerID, scanID)
+	if err != nil {
+		s.logger.Error("read scan report summary failed", "scanId", scanID, "error", err)
+		writeProblem(response, request, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The scan report summary is temporarily unavailable.")
 		return
 	}
 	nextCursor := ""
 	if hasMore && len(pages) > 0 {
 		last := pages[len(pages)-1]
-		nextCursor = encodePageCursor(pageCursor{URL: last.URL, ID: last.ID})
+		nextCursor = encodePageCursor(pageCursor{URL: last.URL, ID: last.ID, Filter: fingerprint})
 	}
-	writeJSON(response, http.StatusOK, model.ScanPagesReport{State: state, Items: pages, NextCursor: nextCursor})
+	writeJSON(response, http.StatusOK, model.ScanPagesReport{State: state, Summary: summary, Items: pages, NextCursor: nextCursor})
+}
+
+func issuesOnlyQuery(request *http.Request) (bool, error) {
+	raw := strings.TrimSpace(request.URL.Query().Get("issuesOnly"))
+	if raw == "" {
+		return false, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return false, errors.New("issuesOnly must be true or false")
+	}
+	return value, nil
 }
 
 type pageCursor struct {
-	URL string    `json:"url"`
-	ID  uuid.UUID `json:"id"`
+	URL    string    `json:"url"`
+	ID     uuid.UUID `json:"id"`
+	Filter string    `json:"filter,omitempty"`
+}
+
+func pageFiltersQuery(request *http.Request) (model.PageFilters, error) {
+	issuesOnly, err := issuesOnlyQuery(request)
+	if err != nil {
+		return model.PageFilters{}, err
+	}
+	outcomes, err := enumValues(request.URL.Query()["outcome"], 3, map[string]bool{
+		"SUCCESS": true, "WARNING": true, "FAILED": true,
+	})
+	if err != nil {
+		return model.PageFilters{}, fmt.Errorf("outcome: %w", err)
+	}
+	statusMin, err := optionalInt(request.URL.Query().Get("statusMin"), 0, 599)
+	if err != nil {
+		return model.PageFilters{}, fmt.Errorf("statusMin: %w", err)
+	}
+	statusMax, err := optionalInt(request.URL.Query().Get("statusMax"), 0, 599)
+	if err != nil {
+		return model.PageFilters{}, fmt.Errorf("statusMax: %w", err)
+	}
+	if statusMin != nil && statusMax != nil && *statusMin > *statusMax {
+		return model.PageFilters{}, errors.New("statusMin must be less than or equal to statusMax")
+	}
+	query := strings.TrimSpace(request.URL.Query().Get("q"))
+	if len(query) > 200 {
+		return model.PageFilters{}, errors.New("q must contain at most 200 characters")
+	}
+	indexable, err := optionalBool(request.URL.Query().Get("indexable"))
+	if err != nil {
+		return model.PageFilters{}, fmt.Errorf("indexable: %w", err)
+	}
+	contentTypes, err := boundedValues(request.URL.Query()["contentType"], 10, 128, false)
+	if err != nil {
+		return model.PageFilters{}, fmt.Errorf("contentType: %w", err)
+	}
+	severities, err := enumValues(request.URL.Query()["severity"], 4, map[string]bool{
+		"INFO": true, "WARNING": true, "ERROR": true, "CRITICAL": true,
+	})
+	if err != nil {
+		return model.PageFilters{}, fmt.Errorf("severity: %w", err)
+	}
+	findingCodes, err := boundedValues(request.URL.Query()["findingCode"], 20, 64, true)
+	if err != nil {
+		return model.PageFilters{}, fmt.Errorf("findingCode: %w", err)
+	}
+	return model.PageFilters{
+		IssuesOnly: issuesOnly, Outcomes: outcomes, StatusMin: statusMin, StatusMax: statusMax,
+		Query: query, Indexable: indexable, ContentTypes: contentTypes,
+		Severities: severities, FindingCodes: findingCodes,
+	}, nil
+}
+
+func optionalInt(raw string, minimum, maximum int) (*int, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < minimum || value > maximum {
+		return nil, fmt.Errorf("must be between %d and %d", minimum, maximum)
+	}
+	return &value, nil
+}
+
+func optionalBool(raw string) (*bool, error) {
+	if strings.TrimSpace(raw) == "" {
+		return nil, nil
+	}
+	value, err := strconv.ParseBool(raw)
+	if err != nil {
+		return nil, errors.New("must be true or false")
+	}
+	return &value, nil
+}
+
+func enumValues(values []string, maximum int, allowed map[string]bool) ([]string, error) {
+	normalized, err := boundedValues(values, maximum, 64, true)
+	if err != nil {
+		return nil, err
+	}
+	for _, value := range normalized {
+		if !allowed[value] {
+			return nil, errors.New("contains an unsupported value")
+		}
+	}
+	return normalized, nil
+}
+
+func boundedValues(values []string, maximum, maxLength int, uppercase bool) ([]string, error) {
+	unique := make(map[string]struct{})
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if uppercase {
+			value = strings.ToUpper(value)
+		} else {
+			value = strings.ToLower(value)
+		}
+		if value == "" || len(value) > maxLength {
+			return nil, errors.New("contains an invalid value")
+		}
+		unique[value] = struct{}{}
+	}
+	if len(unique) > maximum {
+		return nil, fmt.Errorf("accepts at most %d values", maximum)
+	}
+	result := make([]string, 0, len(unique))
+	for value := range unique {
+		result = append(result, value)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func filterFingerprint(filters model.PageFilters) string {
+	encoded, _ := json.Marshal(filters)
+	digest := sha256.Sum256(encoded)
+	return base64.RawURLEncoding.EncodeToString(digest[:])
 }
 
 func pageQuery(request *http.Request) (int, pageCursor, error) {
@@ -130,22 +282,22 @@ func encodePageCursor(cursor pageCursor) string {
 func (s *Server) getPage(response http.ResponseWriter, request *http.Request) {
 	ownerID, err := uuid.Parse(request.URL.Query().Get("ownerId"))
 	if err != nil {
-		writeProblem(response, http.StatusBadRequest, "INVALID_OWNER_ID", "ownerId must be a UUID.")
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_OWNER_ID", "ownerId must be a UUID.")
 		return
 	}
 	pageID, err := uuid.Parse(request.PathValue("pageId"))
 	if err != nil {
-		writeProblem(response, http.StatusBadRequest, "INVALID_PAGE_ID", "pageId must be a UUID.")
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_PAGE_ID", "pageId must be a UUID.")
 		return
 	}
 	page, err := s.reports.GetPage(request.Context(), ownerID, pageID)
 	if errors.Is(err, analytics.ErrPageNotFound) {
-		writeProblem(response, http.StatusNotFound, "PAGE_NOT_FOUND", "The page report does not exist.")
+		writeProblem(response, request, http.StatusNotFound, "PAGE_NOT_FOUND", "The page report does not exist.")
 		return
 	}
 	if err != nil {
 		s.logger.Error("read page detail failed", "pageId", pageID, "error", err)
-		writeProblem(response, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The page report is temporarily unavailable.")
+		writeProblem(response, request, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The page report is temporarily unavailable.")
 		return
 	}
 	writeJSON(response, http.StatusOK, page)
@@ -173,18 +325,18 @@ func (s *Server) acceptScan(response http.ResponseWriter, request *http.Request)
 	body, err := io.ReadAll(io.LimitReader(request.Body, maxCommandBody+1))
 	var maximumBytesError *http.MaxBytesError
 	if errors.As(err, &maximumBytesError) || len(body) > maxCommandBody {
-		writeProblem(response, http.StatusRequestEntityTooLarge, "COMMAND_TOO_LARGE", "The command body is limited to 64 KiB.")
+		writeProblem(response, request, http.StatusRequestEntityTooLarge, "COMMAND_TOO_LARGE", "The command body is limited to 64 KiB.")
 		return
 	}
 	if err != nil {
-		writeProblem(response, http.StatusBadRequest, "INVALID_COMMAND", "The command body is invalid.")
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_COMMAND", "The command body is invalid.")
 		return
 	}
 	var header struct {
 		MessageType string `json:"messageType"`
 	}
 	if err := json.Unmarshal(body, &header); err != nil {
-		writeProblem(response, http.StatusBadRequest, "INVALID_COMMAND", "The command body is invalid.")
+		writeProblem(response, request, http.StatusBadRequest, "INVALID_COMMAND", "The command body is invalid.")
 		return
 	}
 
@@ -195,7 +347,7 @@ func (s *Server) acceptScan(response http.ResponseWriter, request *http.Request)
 	case contracts.ScanRequestedV1:
 		var envelope contracts.ScanCommandEnvelope
 		if err := decodeStrict(body, &envelope); err != nil {
-			writeProblem(response, http.StatusBadRequest, "INVALID_COMMAND", "The command body is invalid.")
+			writeProblem(response, request, http.StatusBadRequest, "INVALID_COMMAND", "The command body is invalid.")
 			return
 		}
 		messageID, aggregateID = envelope.MessageID, envelope.AggregateID
@@ -203,24 +355,24 @@ func (s *Server) acceptScan(response http.ResponseWriter, request *http.Request)
 	case contracts.ScanCancelV1:
 		var envelope contracts.ScanCancelCommandEnvelope
 		if err := decodeStrict(body, &envelope); err != nil {
-			writeProblem(response, http.StatusBadRequest, "INVALID_COMMAND", "The command body is invalid.")
+			writeProblem(response, request, http.StatusBadRequest, "INVALID_COMMAND", "The command body is invalid.")
 			return
 		}
 		messageID, aggregateID = envelope.MessageID, envelope.AggregateID
 		duplicate, err = s.store.AcceptCancellation(request.Context(), envelope)
 	default:
-		writeProblem(response, http.StatusUnprocessableEntity, "COMMAND_REJECTED", "The command type is not supported.")
+		writeProblem(response, request, http.StatusUnprocessableEntity, "COMMAND_REJECTED", "The command type is not supported.")
 		return
 	}
 	if err != nil {
 		switch {
 		case errors.Is(err, postgres.ErrMessageCollision):
-			writeProblem(response, http.StatusConflict, "MESSAGE_ID_COLLISION", "The message ID was already used with different content.")
+			writeProblem(response, request, http.StatusConflict, "MESSAGE_ID_COLLISION", "The message ID was already used with different content.")
 		case errors.Is(err, postgres.ErrExecutionNotReady):
-			writeProblem(response, http.StatusConflict, "EXECUTION_NOT_READY", "The crawl execution is not ready for this command.")
+			writeProblem(response, request, http.StatusConflict, "EXECUTION_NOT_READY", "The crawl execution is not ready for this command.")
 		default:
 			s.logger.Error("scan command rejected", "messageId", messageID, "error", err)
-			writeProblem(response, http.StatusUnprocessableEntity, "COMMAND_REJECTED", "The scan command was rejected.")
+			writeProblem(response, request, http.StatusUnprocessableEntity, "COMMAND_REJECTED", "The scan command was rejected.")
 		}
 		return
 	}
@@ -236,7 +388,7 @@ func (s *Server) authenticate(next http.HandlerFunc) http.HandlerFunc {
 		supplied := strings.TrimSpace(request.Header.Get("X-WebLens-Service-Token"))
 		digest := sha256.Sum256([]byte(supplied))
 		if supplied == "" || subtle.ConstantTimeCompare(digest[:], s.serviceDigest[:]) != 1 {
-			writeProblem(response, http.StatusUnauthorized, "SERVICE_AUTHENTICATION_REQUIRED", "Valid service authentication is required.")
+			writeProblem(response, request, http.StatusUnauthorized, "SERVICE_AUTHENTICATION_REQUIRED", "Valid service authentication is required.")
 			return
 		}
 		next(response, request)
@@ -247,6 +399,11 @@ func (s *Server) withSecurityHeaders(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		response.Header().Set("X-Content-Type-Options", "nosniff")
 		response.Header().Set("Cache-Control", "no-store")
+		correlationID := strings.TrimSpace(request.Header.Get("X-Correlation-ID"))
+		if !correlationIDPattern.MatchString(correlationID) {
+			correlationID = uuid.NewString()
+		}
+		response.Header().Set("X-Correlation-ID", correlationID)
 		next.ServeHTTP(response, request)
 	})
 }
@@ -268,15 +425,20 @@ func decodeStrict(body []byte, target any) error {
 	return ensureEOF(decoder)
 }
 
-func writeProblem(response http.ResponseWriter, status int, code, detail string) {
+func writeProblem(response http.ResponseWriter, request *http.Request, status int, code, detail string) {
+	response.Header().Set("Content-Type", "application/problem+json")
 	writeJSON(response, status, map[string]any{
-		"type": "about:blank", "title": http.StatusText(status), "status": status,
-		"code": code, "detail": detail,
+		"type":  "https://docs.weblens.dev/problems/" + strings.ToLower(strings.ReplaceAll(code, "_", "-")),
+		"title": http.StatusText(status), "status": status, "detail": detail,
+		"instance": request.URL.Path, "code": code,
+		"correlationId": response.Header().Get("X-Correlation-ID"),
 	})
 }
 
 func writeJSON(response http.ResponseWriter, status int, value any) {
-	response.Header().Set("Content-Type", "application/json")
+	if response.Header().Get("Content-Type") == "" {
+		response.Header().Set("Content-Type", "application/json")
+	}
 	response.WriteHeader(status)
 	_ = json.NewEncoder(response).Encode(value)
 }

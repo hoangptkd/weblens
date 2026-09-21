@@ -1,7 +1,16 @@
 import { createHash } from 'node:crypto'
 import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
-import { CreateBucketCommand, DeleteObjectCommand, GetObjectCommand, HeadBucketCommand, PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import {
+  CopyObjectCommand,
+  CreateBucketCommand,
+  DeleteObjectCommand,
+  GetObjectCommand,
+  HeadBucketCommand,
+  HeadObjectCommand,
+  PutObjectCommand,
+  S3Client,
+} from '@aws-sdk/client-s3'
 import type { Config } from './config.js'
 import type { StoredObject } from './types.js'
 
@@ -57,6 +66,27 @@ export class ObjectStorage {
   async delete(object: StoredObject): Promise<void> {
     if (object.bucket !== this.config.s3Bucket) throw new Error('INVALID_STORAGE_BUCKET')
     await this.client.send(new DeleteObjectCommand({ Bucket: object.bucket, Key: object.key }))
+  }
+
+  async copy(object: StoredObject, key: string): Promise<StoredObject> {
+    if (object.bucket !== this.config.s3Bucket) throw new Error('INVALID_STORAGE_BUCKET')
+    const source = `${object.bucket}/${object.key.split('/').map(encodeURIComponent).join('/')}`
+    await this.client.send(new CopyObjectCommand({
+      Bucket: object.bucket,
+      Key: key,
+      CopySource: source,
+      MetadataDirective: 'COPY',
+    }))
+    return { ...object, key }
+  }
+
+  async verify(object: StoredObject): Promise<void> {
+    if (object.bucket !== this.config.s3Bucket) throw new Error('INVALID_STORAGE_BUCKET')
+    const head = await this.client.send(new HeadObjectCommand({ Bucket: object.bucket, Key: object.key }))
+    if (head.ContentLength !== object.bytes
+        || head.Metadata?.['sha256'] !== object.sha256.toString('hex')) {
+      throw new Error('ARTIFACT_OBJECT_INTEGRITY_FAILED')
+    }
   }
 
   async get(bucket: string, key: string): Promise<Buffer> {

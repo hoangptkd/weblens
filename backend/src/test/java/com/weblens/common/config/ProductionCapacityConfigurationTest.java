@@ -24,6 +24,10 @@ class ProductionCapacityConfigurationTest {
             assertThat(limits.maxDepth()).isEqualTo(4);
             assertThat(limits.maxDurationSeconds()).isEqualTo(86_400);
             assertThat(limits.concurrency()).isEqualTo(10_000);
+            SiteCloneProperties siteClone = context.getBean(SiteCloneProperties.class);
+            assertThat(siteClone.maxPages()).isEqualTo(100_000);
+            assertThat(siteClone.maxShardBytes()).isEqualTo(268_435_456L);
+            assertThat(siteClone.archiveRetentionDays()).isEqualTo(7);
             assertThat(context.getEnvironment().getProperty(
                     "server.tomcat.max-connections", Integer.class
             )).isEqualTo(100_000);
@@ -70,7 +74,7 @@ class ProductionCapacityConfigurationTest {
     }
 
     @Configuration(proxyBeanMethods = false)
-    @EnableConfigurationProperties(ScanLimitProperties.class)
+    @EnableConfigurationProperties({ScanLimitProperties.class, SiteCloneProperties.class})
     static class TestConfiguration {
     }
 }

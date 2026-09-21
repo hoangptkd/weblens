@@ -17,6 +17,7 @@ type Config struct {
 	ClickHouseDatabase    string
 	ClickHouseUsername    string
 	ClickHousePassword    string
+	ClickHouseSecure      bool
 	ServiceToken          string
 	ControlEventsURL      string
 	WorkerConcurrency     int
@@ -34,6 +35,7 @@ type Config struct {
 func Load() (Config, error) {
 	migrateOnStart, migrateOnStartError := boolValue("CRAWLER_MIGRATE_ON_START", false)
 	localTargetsOnly, localTargetsOnlyError := boolValue("CRAWLER_LOCAL_TARGETS_ONLY", false)
+	clickHouseSecure, clickHouseSecureError := boolValue("CRAWLER_CLICKHOUSE_SECURE", false)
 	cfg := Config{
 		HTTPAddress:           value("CRAWLER_HTTP_ADDRESS", ":8081"),
 		PostgresURL:           strings.TrimSpace(os.Getenv("CRAWLER_POSTGRES_URL")),
@@ -41,6 +43,7 @@ func Load() (Config, error) {
 		ClickHouseDatabase:    value("CRAWLER_CLICKHOUSE_DATABASE", "weblens_crawl_analytics"),
 		ClickHouseUsername:    value("CRAWLER_CLICKHOUSE_USERNAME", "default"),
 		ClickHousePassword:    os.Getenv("CRAWLER_CLICKHOUSE_PASSWORD"),
+		ClickHouseSecure:      clickHouseSecure,
 		ServiceToken:          strings.TrimSpace(os.Getenv("CRAWLER_SERVICE_TOKEN")),
 		ControlEventsURL:      value("CRAWLER_CONTROL_EVENTS_URL", "http://localhost:8080/internal/v1/events/scans"),
 		WorkerConcurrency:     intValue("CRAWLER_WORKER_CONCURRENCY", 10_000),
@@ -57,6 +60,7 @@ func Load() (Config, error) {
 	return cfg, errors.Join(
 		migrateOnStartError,
 		localTargetsOnlyError,
+		clickHouseSecureError,
 		cfg.Validate(),
 	)
 }

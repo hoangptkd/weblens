@@ -1,0 +1,12 @@
+<service>
+  <id>WebLensBackend</id>
+  <name>WebLens Backend</name>
+  <description>WebLens Spring Boot Control Plane</description>
+  <executable>powershell.exe</executable>
+  <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\WebLens\current\infra\production-windows\run-service.ps1 backend</arguments>
+  <startmode>Automatic</startmode>
+  <stoptimeout>30sec</stoptimeout>
+  <onfailure action="restart" delay="10 sec" />
+  <logpath>C:\ProgramData\WebLens\logs</logpath>
+  <log mode="roll-by-size"><sizeThreshold>10240</sizeThreshold><keepFiles>5</keepFiles></log>
+</service>

@@ -46,6 +46,16 @@ Mỗi browser capture mới cũng tạo best-effort một archive clone tĩnh c�
 trang theo ADR-007: same-origin, có manifest, giới hạn 100 file/50 MiB input/64
 MiB archive, lưu private trong object storage và chỉ cho tải xuống trong 7 ngày.
 
+Ngày 2026-09-18, hướng sản phẩm V1.5 được mở rộng để bổ sung clone toàn website
+theo ADR-007 revision 2. Từ revision 3 ngày 2026-09-20, workflow này mặc định là
+**Design Clone**: WebLens giữ một trang đại diện cho mỗi chức năng, route template
+và layout khác biệt thay vì sao lưu mọi URL chỉ khác nội dung hoặc locale. Người
+dùng nhập URL; WebLens tự tạo scan mới, chọn representative deterministic, render
+bằng Capture Worker, deduplicate asset xuyên page và tạo archive download-only
+không chứa screenshot. Người dùng không phải chọn scan. Baseline workload, schema
+và runtime đã được phê duyệt trong TASK-015; TASK-018 không đổi database schema.
+Tuyên bố sức chứa production vẫn phải dựa trên benchmark phần cứng thực tế.
+
 ## Explicitly not V1
 
 V1 và V1.5 không phải nền tảng SEO, security, accessibility hoặc billing đầy đủ.

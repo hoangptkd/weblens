@@ -88,6 +88,26 @@ services:
     volumes:
       - weblens-minio-data:/data
 
+  minio-bootstrap:
+    image: quay.io/minio/minio:RELEASE.2025-04-22T22-12-26Z
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - >-
+        mc alias set local http://minio:9000 "$${MINIO_ROOT_USER}" "$${MINIO_ROOT_PASSWORD}" &&
+        mc mb --ignore-existing "local/$${S3_CAPTURE_BUCKET}" &&
+        case "$$(mc ilm rule ls "local/$${S3_CAPTURE_BUCKET}" 2>/dev/null)" in
+        *site-clone-staging/*) : ;;
+        *) mc ilm rule add --prefix 'site-clone-staging/' --expire-days 1 "local/$${S3_CAPTURE_BUCKET}" ;;
+        esac
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-weblens_minio}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-weblens-minio-local-only}
+      S3_CAPTURE_BUCKET: ${S3_CAPTURE_BUCKET:-weblens-captures}
+    depends_on:
+      minio:
+        condition: service_healthy
+
   capture-worker:
     build:
       context: ../capture-worker
@@ -105,7 +125,10 @@ services:
       S3_CAPTURE_BUCKET: ${S3_CAPTURE_BUCKET:-weblens-captures}
       WEBLENS_SERVICE_TOKEN: ${WEBLENS_SERVICE_TOKEN}
       WEBLENS_CONTROL_CAPTURE_EVENT_URL: http://host.docker.internal:8080/internal/v1/events/captures
+      WEBLENS_CONTROL_SITE_CLONE_EVENT_URL: http://host.docker.internal:8080/internal/v1/events/site-clones
+      WEBLENS_CRAWLER_REPORT_BASE_URL: http://host.docker.internal:8081
       CAPTURE_CONCURRENCY: ${CAPTURE_CONCURRENCY:-2}
+      CAPTURE_SITE_CLONE_CONCURRENCY: ${CAPTURE_SITE_CLONE_CONCURRENCY:-2}
       CAPTURE_RECONSTRUCTION_GC_POLL_MS: ${CAPTURE_RECONSTRUCTION_GC_POLL_MS:-30000}
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -116,8 +139,8 @@ services:
         condition: service_healthy
       clickhouse:
         condition: service_healthy
-      minio:
-        condition: service_healthy
+      minio-bootstrap:
+        condition: service_completed_successfully
 
 volumes:
   weblens-postgres-data:

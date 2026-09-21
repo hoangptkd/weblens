@@ -1,9 +1,8 @@
 package com.weblens.messaging;
 
 import com.weblens.messaging.contract.ScanEventEnvelope;
+import com.weblens.messaging.contract.EventAcknowledgement;
 import jakarta.validation.Valid;
-import java.util.Map;
-import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
@@ -20,12 +19,8 @@ public class ScanEventController {
     }
 
     @PostMapping("/scans")
-    ResponseEntity<Map<String, Object>> consume(@Valid @RequestBody ScanEventEnvelope envelope) {
+    EventAcknowledgement consume(@Valid @RequestBody ScanEventEnvelope envelope) {
         ScanEventService.ConsumeResult result = events.consume(envelope);
-        return ResponseEntity.ok(Map.of(
-                "accepted", true,
-                "duplicate", result.duplicate(),
-                "outcome", result.outcome()
-        ));
+        return new EventAcknowledgement(true, result.duplicate(), result.outcome());
     }
 }

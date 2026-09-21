@@ -228,7 +228,9 @@ func (f *Fetcher) Fetch(ctx context.Context, targetURL, hostname string, maxBody
 	result.FinalURL = response.Request.URL.String()
 	result.StatusCode = response.StatusCode
 	result.ContentType = response.Header.Get("Content-Type")
-	result.XRobotsTag = bounded(strings.Join(response.Header.Values("X-Robots-Tag"), ", "), 512)
+	// Preserve header-field boundaries so user-agent-scoped directives are not
+	// mistaken for generic indexing directives.
+	result.XRobotsTag = bounded(strings.Join(response.Header.Values("X-Robots-Tag"), "\n"), 512)
 	result.Redirects = append(result.Redirects, policy.redirects...)
 	reader := io.LimitReader(response.Body, maxBodyBytes+1)
 	body, err := io.ReadAll(reader)

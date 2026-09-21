@@ -41,6 +41,8 @@ export interface ApiLatestScan {
   status: ApiScanStatus
   createdAt: string
   finishedAt: string | null
+  processedPages: number
+  failedPages: number
 }
 
 export interface ApiWebsite {
@@ -51,9 +53,18 @@ export interface ApiWebsite {
   status: 'ACTIVE' | 'ARCHIVED'
   latestScan: ApiLatestScan | null
   pageCount: number
-  findingCount: number
+  failedPageCount: number
   createdAt: string
   updatedAt: string
+}
+
+export interface ApiDashboardSummary {
+  activeWebsites: number
+  scansLast30Days: number
+  activeScans: number
+  processedPages: number
+  succeededPages: number
+  failedPages: number
 }
 
 export type ApiScanStatus =
@@ -94,7 +105,6 @@ export interface ApiScan {
   progress: ApiScanProgress
   effectiveConfig: ApiEffectiveScanConfig
   collectorVersion: string
-  findingCount: number
   terminalReason: { code: string; message: string } | null
 }
 
@@ -159,6 +169,16 @@ export interface ApiScanPage {
 
 export interface ApiScanPages {
   items: ApiScanPage[]
+  summary: {
+    totalUrlCount: number
+    issuePageCount: number
+    findingCount: number
+    status2xxCount: number
+    status3xxCount: number
+    status4xxCount: number
+    status5xxCount: number
+    noResponseCount: number
+  }
   analyticsExpectedCount: number
   analyticsPublishedCount: number
   analyticsWatermark: string | null
@@ -202,4 +222,34 @@ export interface ApiCaptureSnapshot {
   artifacts: NonNullable<import('../domain/types').PageSnapshot['artifacts']>
   reconstruction: import('../domain/types').StaticReconstruction | null
   resources: import('../domain/types').CapturedResource[]
+}
+
+export interface ApiSiteCloneArtifact {
+  id: string
+  kind: 'ARCHIVE_SHARD' | 'MANIFEST'
+  shardNumber: number
+  filename: string
+  byteSize: number
+  sha256: string
+  expiresAt: string
+}
+
+export interface ApiSiteClone {
+  id: string
+  websiteId?: string | null
+  scanId: string
+  targetUrl: string
+  status: import('../domain/types').SiteCloneStatus
+  discoveredCount: number
+  processedCount: number
+  succeededCount: number
+  failedCount: number
+  artifactCount: number
+  totalArchiveBytes: number
+  terminalCode?: string | null
+  terminalMessage?: string | null
+  createdAt: string
+  startedAt?: string | null
+  finishedAt?: string | null
+  artifacts: ApiSiteCloneArtifact[]
 }

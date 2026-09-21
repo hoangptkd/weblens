@@ -107,6 +107,25 @@ class FoundationApiIT {
                 .andExpect(status().isCreated())
                 .andReturn();
         String secondWebsiteId = json(secondWebsiteCreation).path("id").asText();
+
+        mvc.perform(get("/api/v1/websites")
+                        .header(HttpHeaders.AUTHORIZATION, bearer(accessToken))
+                        .queryParam("status", "ACTIVE")
+                        .queryParam("q", "other")
+                        .queryParam("sort", "name,asc"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalItems").value(1))
+                .andExpect(jsonPath("$.items[0].id").value(secondWebsiteId));
+
+        mvc.perform(get("/api/v1/websites/{websiteId}/scans", websiteId)
+                        .header(HttpHeaders.AUTHORIZATION, bearer(accessToken))
+                        .queryParam("status", "QUEUED")
+                        .queryParam("minFailedPages", "0")
+                        .queryParam("sort", "createdAt,asc"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.totalItems").value(1))
+                .andExpect(jsonPath("$.items[0].id").value(scanId));
+
         mvc.perform(post("/api/v1/websites/{websiteId}/scans", secondWebsiteId)
                         .header(HttpHeaders.AUTHORIZATION, bearer(accessToken))
                         .header("Idempotency-Key", idempotencyKey))

@@ -1,8 +1,8 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { webLensService } from '../api/serviceMode'
-import { snapshot } from '../data/mockData'
+import { webLensService } from '../api/webLensApiService'
+import { snapshot } from '../test/fixtures'
 import { SnapshotPage } from './SnapshotPage'
 
 describe('SnapshotPage', () => {

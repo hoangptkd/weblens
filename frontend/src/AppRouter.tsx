@@ -8,6 +8,7 @@ import { ScanPage } from './pages/ScanPage'
 import { SnapshotPage } from './pages/SnapshotPage'
 import { WebsiteDetailPage } from './pages/WebsiteDetailPage'
 import { WebsitesPage } from './pages/WebsitesPage'
+import { SiteClonePage } from './pages/SiteClonePage'
 
 export function AppRouter() {
   return (
@@ -18,6 +19,8 @@ export function AppRouter() {
       <Route path="/app" element={<AppShell />}>
         <Route index element={<Navigate to="websites" replace />} />
         <Route path="websites" element={<WebsitesPage />} />
+        <Route path="clone" element={<SiteClonePage />} />
+        <Route path="clone/:siteCloneId" element={<SiteClonePage />} />
         <Route path="websites/:websiteId" element={<WebsiteDetailPage />} />
         <Route path="scans/:scanId" element={<ScanPage />} />
         <Route path="pages/:scanPageId" element={<PageDetailPage />} />

@@ -11,6 +11,13 @@ public interface WebsiteScanLookup {
 
     boolean hasActiveScan(UUID ownerId, UUID websiteId);
 
-    record LatestScanSummary(UUID id, String status, Instant createdAt, Instant finishedAt) {
+    record LatestScanSummary(
+            UUID id,
+            String status,
+            Instant createdAt,
+            Instant finishedAt,
+            int processedPages,
+            int failedPages
+    ) {
     }
 }

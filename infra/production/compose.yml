@@ -1,0 +1,284 @@
+name: weblens-production
+
+x-service-security: &service-security
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+  logging:
+    driver: json-file
+    options:
+      max-size: "10m"
+      max-file: "5"
+
+services:
+  frontend:
+    <<: *service-security
+    image: ${WEBLENS_IMAGE_REGISTRY:?WEBLENS_IMAGE_REGISTRY is required}/weblens-frontend:${WEBLENS_IMAGE_TAG:?WEBLENS_IMAGE_TAG is required}
+    environment:
+      ACME_EMAIL: ${ACME_EMAIL:?ACME_EMAIL is required}
+      WEBLENS_SITE_ADDRESS: ${WEBLENS_PUBLIC_URL:?WEBLENS_PUBLIC_URL is required}
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - caddy-data:/data
+      - caddy-config:/config
+    networks:
+      - edge
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8080/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+
+  backend:
+    <<: *service-security
+    image: ${WEBLENS_IMAGE_REGISTRY}/weblens-backend:${WEBLENS_IMAGE_TAG}
+    environment:
+      DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB:-weblens}
+      DB_USERNAME: ${POSTGRES_USER:-weblens}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      WEBLENS_JWT_SECRET: ${WEBLENS_JWT_SECRET:?WEBLENS_JWT_SECRET is required}
+      WEBLENS_COOKIE_SECURE: "true"
+      WEBLENS_CORS_ORIGINS: ${WEBLENS_PUBLIC_URL}
+      WEBLENS_OPENAPI_ENABLED: "false"
+      WEBLENS_SERVICE_TOKEN: ${WEBLENS_SERVICE_TOKEN:?WEBLENS_SERVICE_TOKEN is required}
+      WEBLENS_CRAWLER_COMMAND_URL: http://crawler:8081/internal/v1/commands/scans
+      WEBLENS_CRAWLER_REPORT_BASE_URL: http://crawler:8081
+      WEBLENS_CAPTURE_COMMAND_URL: http://capture-worker:8082/internal/v1/commands/captures
+      WEBLENS_SITE_CLONE_COMMAND_URL: http://capture-worker:8082/internal/v1/commands/site-clones
+      WEBLENS_CAPTURE_REPORT_BASE_URL: http://capture-worker:8082
+      WEBLENS_SCAN_MAX_PAGES: ${WEBLENS_SCAN_MAX_PAGES:-1000}
+      WEBLENS_SCAN_MAX_DEPTH: ${WEBLENS_SCAN_MAX_DEPTH:-4}
+      WEBLENS_SCAN_MAX_DURATION_SECONDS: ${WEBLENS_SCAN_MAX_DURATION_SECONDS:-3600}
+      WEBLENS_SCAN_CONCURRENCY: ${WEBLENS_SCAN_CONCURRENCY:-32}
+      WEBLENS_SITE_CLONE_MAX_PAGES: ${WEBLENS_SITE_CLONE_MAX_PAGES:-1000}
+      WEBLENS_SITE_CLONE_MAX_INPUT_BYTES: ${WEBLENS_SITE_CLONE_MAX_INPUT_BYTES:-2147483648}
+      WEBLENS_SITE_CLONE_MAX_ARCHIVE_BYTES: ${WEBLENS_SITE_CLONE_MAX_ARCHIVE_BYTES:-536870912}
+      WEBLENS_SITE_CLONE_MAX_SHARD_BYTES: ${WEBLENS_SITE_CLONE_MAX_SHARD_BYTES:-134217728}
+      WEBLENS_SITE_CLONE_PAGE_CONCURRENCY: ${WEBLENS_SITE_CLONE_PAGE_CONCURRENCY:-2}
+      WEBLENS_SITE_CLONE_MAX_RETRIES_PER_PAGE: ${WEBLENS_SITE_CLONE_MAX_RETRIES_PER_PAGE:-3}
+      WEBLENS_SITE_CLONE_MAX_DURATION_SECONDS: ${WEBLENS_SITE_CLONE_MAX_DURATION_SECONDS:-86400}
+      WEBLENS_HIKARI_MAX_POOL_SIZE: ${WEBLENS_HIKARI_MAX_POOL_SIZE:-20}
+      WEBLENS_HIKARI_MIN_IDLE: ${WEBLENS_HIKARI_MIN_IDLE:-4}
+      WEBLENS_TOMCAT_MAX_CONNECTIONS: ${WEBLENS_TOMCAT_MAX_CONNECTIONS:-2000}
+      WEBLENS_TOMCAT_ACCEPT_COUNT: ${WEBLENS_TOMCAT_ACCEPT_COUNT:-500}
+      WEBLENS_TOMCAT_MAX_THREADS: ${WEBLENS_TOMCAT_MAX_THREADS:-200}
+      WEBLENS_TOMCAT_MIN_SPARE_THREADS: ${WEBLENS_TOMCAT_MIN_SPARE_THREADS:-20}
+      SERVER_FORWARD_HEADERS_STRATEGY: framework
+    expose:
+      - "8080"
+    networks:
+      - edge
+      - app
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/actuator/health | grep -q '\"status\":\"UP\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    stop_grace_period: 30s
+
+  crawler:
+    <<: *service-security
+    image: ${WEBLENS_IMAGE_REGISTRY}/weblens-crawler:${WEBLENS_IMAGE_TAG}
+    environment:
+      CRAWLER_POSTGRES_URL: postgres://${CRAWLER_POSTGRES_USER:-weblens_crawler}:${CRAWLER_POSTGRES_PASSWORD:?CRAWLER_POSTGRES_PASSWORD is required}@crawler-postgres:5432/${CRAWLER_POSTGRES_DB:-weblens_crawler}?sslmode=disable
+      CRAWLER_CLICKHOUSE_ADDR: clickhouse:9000
+      CRAWLER_CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-weblens_crawl_analytics}
+      CRAWLER_CLICKHOUSE_USERNAME: ${CLICKHOUSE_USER:-weblens_runtime}
+      CRAWLER_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:?CLICKHOUSE_PASSWORD is required}
+      CRAWLER_SERVICE_TOKEN: ${WEBLENS_SERVICE_TOKEN}
+      CRAWLER_CONTROL_EVENTS_URL: http://backend:8080/internal/v1/events/scans
+      CRAWLER_HTTP_ADDRESS: :8081
+      CRAWLER_MIGRATE_ON_START: "false"
+      CRAWLER_WORKER_CONCURRENCY: ${CRAWLER_WORKER_CONCURRENCY:-32}
+      CRAWLER_HOST_CONCURRENCY: ${CRAWLER_HOST_CONCURRENCY:-2}
+      CRAWLER_HOST_DELAY: ${CRAWLER_HOST_DELAY:-1s}
+      CRAWLER_LOCAL_TARGETS_ONLY: "false"
+      CRAWLER_ANALYTICS_BACKPRESSURE_AGE: ${CRAWLER_ANALYTICS_BACKPRESSURE_AGE:-15m}
+    expose:
+      - "8081"
+    networks:
+      - app
+      - egress
+    depends_on:
+      crawler-migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8081/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 20s
+    stop_grace_period: 30s
+
+  crawler-migrate:
+    image: ${WEBLENS_IMAGE_REGISTRY}/weblens-crawler:${WEBLENS_IMAGE_TAG}
+    restart: "no"
+    command: ["migrate"]
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      CRAWLER_POSTGRES_URL: postgres://${CRAWLER_POSTGRES_USER:-weblens_crawler}:${CRAWLER_POSTGRES_PASSWORD}@crawler-postgres:5432/${CRAWLER_POSTGRES_DB:-weblens_crawler}?sslmode=disable
+      CRAWLER_CLICKHOUSE_ADDR: clickhouse:9000
+      CRAWLER_CLICKHOUSE_DATABASE: ${CLICKHOUSE_DB:-weblens_crawl_analytics}
+      CRAWLER_CLICKHOUSE_USERNAME: ${CLICKHOUSE_USER:-weblens_runtime}
+      CRAWLER_CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CRAWLER_SERVICE_TOKEN: ${WEBLENS_SERVICE_TOKEN}
+      CRAWLER_CONTROL_EVENTS_URL: http://backend:8080/internal/v1/events/scans
+    networks:
+      - app
+    depends_on:
+      crawler-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+
+  capture-worker:
+    <<: *service-security
+    image: ${WEBLENS_IMAGE_REGISTRY}/weblens-capture-worker:${WEBLENS_IMAGE_TAG}
+    init: true
+    shm_size: 1gb
+    environment:
+      CAPTURE_PORT: 8082
+      CAPTURE_DATABASE_URL: postgresql://${CAPTURE_POSTGRES_USER:-weblens_capture}:${CAPTURE_POSTGRES_PASSWORD:?CAPTURE_POSTGRES_PASSWORD is required}@capture-postgres:5432/${CAPTURE_POSTGRES_DB:-weblens_capture}
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_CAPTURE_DATABASE: ${CLICKHOUSE_CAPTURE_DATABASE:-weblens_capture_analytics}
+      CLICKHOUSE_USERNAME: ${CLICKHOUSE_USER:-weblens_runtime}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      S3_ENDPOINT: ${S3_ENDPOINT:?S3_ENDPOINT is required}
+      S3_REGION: ${S3_REGION:-auto}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:?S3_ACCESS_KEY is required}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:?S3_SECRET_KEY is required}
+      S3_CAPTURE_BUCKET: ${S3_CAPTURE_BUCKET:-weblens-captures}
+      WEBLENS_SERVICE_TOKEN: ${WEBLENS_SERVICE_TOKEN}
+      WEBLENS_CONTROL_CAPTURE_EVENT_URL: http://backend:8080/internal/v1/events/captures
+      WEBLENS_CONTROL_SITE_CLONE_EVENT_URL: http://backend:8080/internal/v1/events/site-clones
+      WEBLENS_CRAWLER_REPORT_BASE_URL: http://crawler:8081
+      CAPTURE_CONCURRENCY: ${CAPTURE_CONCURRENCY:-2}
+      CAPTURE_SITE_CLONE_CONCURRENCY: ${CAPTURE_SITE_CLONE_CONCURRENCY:-1}
+      CAPTURE_RECONSTRUCTION_GC_POLL_MS: ${CAPTURE_RECONSTRUCTION_GC_POLL_MS:-30000}
+    expose:
+      - "8082"
+    networks:
+      - app
+      - egress
+    depends_on:
+      capture-postgres:
+        condition: service_healthy
+      clickhouse:
+        condition: service_healthy
+      crawler:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8082/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 18
+      start_period: 30s
+    stop_grace_period: 45s
+
+  postgres:
+    <<: *service-security
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-weblens}
+      POSTGRES_USER: ${POSTGRES_USER:-weblens}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 60s
+
+  crawler-postgres:
+    <<: *service-security
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${CRAWLER_POSTGRES_DB:-weblens_crawler}
+      POSTGRES_USER: ${CRAWLER_POSTGRES_USER:-weblens_crawler}
+      POSTGRES_PASSWORD: ${CRAWLER_POSTGRES_PASSWORD}
+    volumes:
+      - crawler-postgres-data:/var/lib/postgresql/data
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 60s
+
+  capture-postgres:
+    <<: *service-security
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_DB: ${CAPTURE_POSTGRES_DB:-weblens_capture}
+      POSTGRES_USER: ${CAPTURE_POSTGRES_USER:-weblens_capture}
+      POSTGRES_PASSWORD: ${CAPTURE_POSTGRES_PASSWORD}
+    volumes:
+      - capture-postgres-data:/var/lib/postgresql/data
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    stop_grace_period: 60s
+
+  clickhouse:
+    <<: *service-security
+    image: clickhouse/clickhouse-server:26.3
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DB:-weblens_crawl_analytics}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-weblens_runtime}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+    networks:
+      - app
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://127.0.0.1:8123/ping || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    stop_grace_period: 60s
+
+networks:
+  edge:
+  app:
+    internal: true
+  egress:
+
+volumes:
+  postgres-data:
+    name: weblens-prod-postgres
+  crawler-postgres-data:
+    name: weblens-prod-crawler-postgres
+  capture-postgres-data:
+    name: weblens-prod-capture-postgres
+  clickhouse-data:
+    name: weblens-prod-clickhouse
+  caddy-data:
+    name: weblens-prod-caddy-data
+  caddy-config:
+    name: weblens-prod-caddy-config

@@ -23,6 +23,11 @@ export interface StaticClonePlan {
   replacements: Record<string, string>
 }
 
+export interface StaticClonePlanOptions {
+  mainPath?: string
+  contentAddressedResources?: boolean
+}
+
 interface ManifestFile {
   kind: 'DOCUMENT' | 'RESOURCE'
   sourceUrl: string
@@ -46,9 +51,11 @@ export function planStaticClone(
   finalUrl: string,
   resources: CloneInputResource[],
   htmlBytes = 0,
+  options: StaticClonePlanOptions = {},
 ): StaticClonePlan {
-  const mainPath = inferExtension(urlToLocalPath(finalUrl), 'text/html')
+  const mainPath = options.mainPath ?? inferExtension(urlToLocalPath(finalUrl), 'text/html')
   const used = new Set<string>([mainPath.toLowerCase()])
+  const contentPaths = new Map<string, string>()
   const replacements: Record<string, string> = {}
   let plannedFiles = 1
   let plannedBytes = htmlBytes
@@ -57,14 +64,26 @@ export function planStaticClone(
     if (!isSameOrigin(resource.sourceUrl, finalUrl)) {
       return { ...resource, localPath: null, skipReason: 'EXTERNAL_ORIGIN' }
     }
+    const bodyHash = sha256(resource.body)
+    const desired = options.contentAddressedResources
+      ? inferExtension(posix.join('assets', bodyHash), resource.mimeType)
+      : inferExtension(urlToLocalPath(resource.sourceUrl), resource.mimeType)
+    const contentKey = resource.resourceType === 'stylesheet'
+      ? `${desired}\n${normalizeResourceUrl(resource.sourceUrl)}`
+      : desired
+    const existingPath = options.contentAddressedResources ? contentPaths.get(contentKey) : undefined
+    if (existingPath) {
+      replacements[normalizeResourceUrl(resource.sourceUrl)] = relativeArchivePath(mainPath, existingPath)
+      return { ...resource, localPath: existingPath }
+    }
     if (plannedFiles >= STATIC_CLONE_MAX_FILES) {
       return { ...resource, localPath: null, skipReason: 'FILE_COUNT_BUDGET_EXCEEDED' }
     }
     if (plannedBytes + resource.body.length > STATIC_CLONE_MAX_INPUT_BYTES) {
       return { ...resource, localPath: null, skipReason: 'CLONE_INPUT_BUDGET_EXCEEDED' }
     }
-    const desired = inferExtension(urlToLocalPath(resource.sourceUrl), resource.mimeType)
     const localPath = deduplicatePath(desired, used)
+    if (options.contentAddressedResources) contentPaths.set(contentKey, localPath)
     replacements[normalizeResourceUrl(resource.sourceUrl)] = relativeArchivePath(mainPath, localPath)
     plannedFiles += 1
     plannedBytes += resource.body.length
@@ -83,6 +102,7 @@ export async function buildStaticClone(
   }
 
   const selected: Array<{ resource: PlannedResource; body: Buffer }> = []
+  const selectedPaths = new Set<string>()
   let inputBytes = rewrittenHtml.length
   let contentFileCount = 1
   let budgetSkipped = false
@@ -100,6 +120,7 @@ export async function buildStaticClone(
     const body = resource.resourceType === 'stylesheet'
       ? Buffer.from(rewriteCss(resource.body.toString('utf8'), resource.sourceUrl, resource.localPath, plan), 'utf8')
       : resource.body
+    if (selectedPaths.has(resource.localPath.toLowerCase())) continue
     if (inputBytes + body.length > STATIC_CLONE_MAX_INPUT_BYTES) {
       resource.localPath = null
       resource.skipReason = 'CLONE_INPUT_BUDGET_EXCEEDED'
@@ -108,6 +129,7 @@ export async function buildStaticClone(
     }
     inputBytes += body.length
     contentFileCount += 1
+    selectedPaths.add(resource.localPath.toLowerCase())
     selected.push({ resource, body })
   }
 
@@ -115,7 +137,7 @@ export async function buildStaticClone(
     'DOCUMENT', plan.finalUrl, plan.mainPath, 'document', 'text/html', rewrittenHtml, false, null,
   )]
   for (const resource of plan.resources) {
-    const selectedBody = selected.find((item) => item.resource === resource)?.body ?? null
+    const selectedBody = selected.find((item) => item.resource.localPath === resource.localPath)?.body ?? null
     files.push(selectedBody && resource.localPath
       ? manifestFile(
           'RESOURCE', resource.sourceUrl, resource.localPath, resource.resourceType,
@@ -178,6 +200,29 @@ export async function buildStaticClone(
       archivePath,
       temporaryDirectory,
       manifest,
+      siteBundle: {
+        schemaVersion: 1,
+        sourceFinalUrl: plan.finalUrl,
+        publicFinalUrl: redactUrl(plan.finalUrl),
+        mainPath: plan.mainPath,
+        capturedAt: new Date().toISOString(),
+        files: [
+          {
+            kind: 'DOCUMENT', localPath: plan.mainPath, sourceUrl: plan.finalUrl,
+            contentType: 'text/html; charset=utf-8', body: rewrittenHtml,
+          },
+          ...selected.map(({ resource, body }) => ({
+            kind: 'RESOURCE' as const,
+            localPath: resource.localPath!,
+            sourceUrl: resource.sourceUrl,
+            contentType: resource.mimeType || 'application/octet-stream',
+            // For stylesheets: store original body so multi-page assembly can
+            // rewrite CSS once with the complete resource map from all pages.
+            // Single-page static clone ZIP already uses the rewritten `body`.
+            body: resource.resourceType === 'stylesheet' ? resource.body! : body,
+          })),
+        ],
+      },
     }
   } catch {
     await rm(temporaryDirectory, { recursive: true, force: true }).catch(() => undefined)
@@ -231,7 +276,10 @@ export function rewriteCss(css: string, sourceUrl: string, sourcePath: string, p
 }
 
 export function sanitizePathComponent(value: string): string {
-  let result = value.replace(/[<>:"|?*\u0000-\u001f\\/]/gu, '_').replace(/[. ]+$/u, '')
+  let result = value.normalize('NFC')
+    .replace(/[<>:"|?*\u0000-\u001f\\/]/gu, '_')
+    .replace(/[^a-z0-9._-]/giu, '_')
+    .replace(/[. ]+$/u, '')
   if (!result || result === '.' || result === '..') result = '_'
   const base = (result.split('.')[0] ?? '').toUpperCase()
   if (/^(?:CON|PRN|AUX|NUL|COM[1-9]|LPT[1-9])$/u.test(base)) result = `_${result}`
@@ -275,6 +323,7 @@ function failed(discoveredCount: number, failureCode: string): ReconstructionBui
     packagedCount: 0, skippedCount: Math.max(0, discoveredCount - 1), inputBytes: 0,
     archiveBytes: null, completenessCode: null, failureCode,
     archivePath: null, temporaryDirectory: null, manifest: null,
+    siteBundle: null,
   }
 }
 

@@ -12,10 +12,16 @@ Worker lưu workflow trong PostgreSQL, rendered/network fact trong ClickHouse v�
 artifact lớn trong MinIO. E2E đăng ký → website → scan → page evidence → capture →
 snapshot đã đạt; capacity production vẫn cần benchmark trên phần cứng triển khai.
 Clone tĩnh một trang của TASK-013 cũng đã đạt E2E với staged publish, SHA-256,
-download owner-scoped và retention GC; clone toàn website không thuộc lát cắt này.
+download owner-scoped và retention GC. Clone website theo ADR-007 revision 3 mặc
+định là Design Clone: Control Plane vẫn orchestrate, Capture PostgreSQL vẫn giữ
+durable page work, nhưng Capture Worker lọc locale/canonical/query, phân nhóm
+semantic role + route template và chỉ dùng Playwright cho ứng viên đại diện.
+Assembly deduplicate lần cuối bằng DOM layout fingerprint, deduplicate asset xuyên
+page, rewrite link, tạo archive shard không có screenshot, owner-scoped download,
+cancellation và GC. Capacity production vẫn cần benchmark trên hạ tầng triển khai.
 
-PostgreSQL production được tự triển khai theo
-[ADR-004](adr/ADR-004-self-hosted-postgresql.md). Kiến trúc ba deployable và cách
+PostgreSQL production dùng Neon và các deployable chạy Windows-native theo
+[ADR-010](adr/ADR-010-windows-native-vps-deployment.md). Kiến trúc ba deployable và cách
 sử dụng CrawlObserver được phê duyệt trong
 [ADR-005](adr/ADR-005-tach-crawler-thanh-microservice.md). ClickHouse analytical
 store được phê duyệt trong
@@ -85,6 +91,19 @@ TLS impersonation không được nhập.
 - Redact secret/cookie/header, hash và upload artifact lớn vào S3/MinIO.
 - Persist capture metadata/outbox, batch network/resource facts sang ClickHouse;
   hỗ trợ retry và cleanup object mồ côi.
+- Theo revision 2, sở hữu durable site-reconstruction workflow, browser page
+  fan-out, cross-page asset dedup và final archive assembly. Crawler vẫn sở hữu
+  URL discovery/frontier.
+- Theo revision 3, sở hữu deterministic Design Clone selection, DOM fingerprint,
+  representative assembly và staging prefix có lifecycle 24 giờ. URL bị loại tận
+  dụng page-work row hiện có với terminal status/reason code; không thêm schema.
+- Public site-clone command nhận URL thay vì yêu cầu user chọn `scan_id`. Control
+  Plane tạo scan mới và truyền opaque `scan_id` nội bộ qua workflow để bảo đảm
+  freshness, idempotency, truy vết và resume.
+- Render Monitor dùng endpoint progress owner-scoped riêng, đọc snapshot từ
+  site-reconstruction jobs/pages hiện hữu; không tạo event store hoặc schema mới.
+  Control Plane authorize trước khi chuyển tiếp, không giữ transaction database
+  trong lúc gọi worker. UI poll 5 giây, phân trang keyset và tách render khỏi publish.
 
 Capture Worker không thực thi HTML/JavaScript trong Control Plane hay Crawler
 Service. Browser egress phải bị chặn ở network/container layer, không dựa vào Go

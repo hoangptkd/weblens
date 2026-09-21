@@ -5,6 +5,7 @@ import { SafeProxy } from './safe-proxy.js'
 import { buildStaticClone, planStaticClone } from './static-clone.js'
 import type {
   CaptureCommandPayload,
+  CapturePageOptions,
   CaptureResult,
   CloneInputResource,
   DiffSummary,
@@ -33,7 +34,10 @@ interface ResponseCandidate {
 
 const bodyResourceTypes = new Set(['stylesheet', 'script', 'image', 'font'])
 
-export async function capturePage(command: CaptureCommandPayload): Promise<CaptureResult> {
+export async function capturePage(
+  command: CaptureCommandPayload,
+  options: CapturePageOptions = {},
+): Promise<CaptureResult> {
   await assertPublicHttpUrl(command.targetUrl)
   const proxy = new SafeProxy()
   await proxy.start()
@@ -178,7 +182,9 @@ export async function capturePage(command: CaptureCommandPayload): Promise<Captu
     })
     const measuredPerformance = performanceSummary(command.measurementProfile, browserMetrics, navigation)
     const html = Buffer.from(await page.content(), 'utf8')
-    const screenshot = await page.screenshot({ type: 'jpeg', quality: 80, fullPage: false })
+    const screenshot = options.captureScreenshot === false
+      ? Buffer.alloc(0)
+      : await page.screenshot({ type: 'jpeg', quality: 80, fullPage: false })
     if (html.length + screenshot.length > command.maxTotalBytes) throw new Error('CAPTURE_BYTE_BUDGET_EXCEEDED')
     const collected = await collectResourceBodies(
       candidates,
@@ -194,7 +200,9 @@ export async function capturePage(command: CaptureCommandPayload): Promise<Captu
       sourceFinalUrl,
       html,
       [...collected.cloneInputs, ...failedCloneInputs].sort((left, right) => left.sequence - right.sequence),
+      options,
     )
+    if (!options.includeSiteBundle) reconstruction.siteBundle = null
     return {
       finalUrl: sanitizeUrl(sourceFinalUrl),
       html,
@@ -378,10 +386,21 @@ async function createReconstruction(
   finalUrl: string,
   html: Buffer,
   resources: CloneInputResource[],
+  options: CapturePageOptions,
 ): Promise<CaptureResult['reconstruction']> {
   try {
-    const plan = planStaticClone(finalUrl, resources, html.length)
-    const cloneHtml = Buffer.from(await rewriteRenderedHtml(page, finalUrl, plan.replacements), 'utf8')
+    const planOptions: import('./static-clone.js').StaticClonePlanOptions = {}
+    if (options.mainPath !== undefined) planOptions.mainPath = options.mainPath
+    if (options.contentAddressedResources !== undefined) {
+      planOptions.contentAddressedResources = options.contentAddressedResources
+    }
+    const plan = planStaticClone(finalUrl, resources, html.length, planOptions)
+    const cloneHtml = Buffer.from(await rewriteRenderedHtml(
+      page,
+      finalUrl,
+      plan.replacements,
+      options.preserveUnmatchedReferences === true,
+    ), 'utf8')
     return await buildStaticClone(plan, cloneHtml)
   } catch {
     return {
@@ -390,6 +409,7 @@ async function createReconstruction(
       skippedCount: resources.length, inputBytes: 0, archiveBytes: null,
       completenessCode: null, failureCode: 'CLONE_BUILD_FAILED', archivePath: null,
       temporaryDirectory: null, manifest: null,
+      siteBundle: null,
     }
   }
 }
@@ -398,8 +418,9 @@ async function rewriteRenderedHtml(
   page: import('playwright').Page,
   finalUrl: string,
   replacements: Record<string, string>,
+  preserveUnmatchedReferences: boolean,
 ): Promise<string> {
-  return page.evaluate(({ baseUrl, paths }) => {
+  return page.evaluate(({ baseUrl, paths, preserveUnmatched }) => {
     const redactOrReplace = (raw: string): string => {
       if (!raw || /^(?:data|blob|about|javascript|chrome|chrome-extension):/iu.test(raw)) return raw
       try {
@@ -410,6 +431,7 @@ async function rewriteRenderedHtml(
         if (replacement) return replacement + fragment
         target.username = ''
         target.password = ''
+        if (preserveUnmatched) return target.toString() + fragment
         for (const key of [...target.searchParams.keys()]) {
           target.searchParams.delete(key)
           target.searchParams.append(key, '[REDACTED]')
@@ -446,7 +468,7 @@ async function rewriteRenderedHtml(
       ? `<!DOCTYPE ${document.doctype.name}>\n`
       : '<!DOCTYPE html>\n'
     return doctype + clone.outerHTML
-  }, { baseUrl: finalUrl, paths: replacements })
+  }, { baseUrl: finalUrl, paths: replacements, preserveUnmatched: preserveUnmatchedReferences })
 }
 
 function diff(staticValue: CaptureCommandPayload['staticObservation'], rendered: RenderedMetadata, at: string): DiffSummary {
