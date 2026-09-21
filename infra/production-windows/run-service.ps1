@@ -35,6 +35,7 @@ switch ($Service) {
         & '.\weblens-crawler.exe' 'migrate-postgres'
     }
     'capture' {
+        $env:PLAYWRIGHT_BROWSERS_PATH = '0'
         Set-Location (Join-Path $current 'capture-worker')
         & (Join-Path $root 'runtime\node22\node.exe') 'dist\index.js'
     }
