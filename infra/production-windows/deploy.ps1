@@ -33,11 +33,14 @@ function Wait-Health([string]$Url, [int]$Attempts = 30) {
     for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
         try {
             if ($Url.StartsWith('https://')) {
-                [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }
+                & curl.exe --fail --silent --show-error --insecure --max-time 5 $Url --output NUL
+                if ($LASTEXITCODE -eq 0) { return }
+            } else {
+                $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 5
+                if ($response.StatusCode -eq 200) { return }
             }
-            $response = Invoke-WebRequest -UseBasicParsing -Uri $Url -TimeoutSec 5
-            if ($response.StatusCode -eq 200) { return }
-        } catch { Start-Sleep -Seconds 2 }
+        } catch {}
+        Start-Sleep -Seconds 2
     }
     throw "Health check failed: $Url"
 }
