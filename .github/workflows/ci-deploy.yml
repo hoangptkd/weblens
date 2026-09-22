@@ -200,7 +200,7 @@ jobs:
           $remote = "$env:VPS_USER@$env:VPS_HOST"
           & ssh @ssh $remote 'powershell.exe -NoProfile -Command "New-Item -ItemType Directory -Force C:\ProgramData\WebLens\incoming | Out-Null"'
           if ($LASTEXITCODE -ne 0) { throw 'Could not prepare remote release directory' }
-          & scp -O -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=20 -i "$HOME\.ssh\id_ed25519" "artifacts\weblens-${{ github.sha }}-windows-amd64.zip" "${remote}:C:/ProgramData/WebLens/incoming/"
+          & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=20 -i "$HOME\.ssh\id_ed25519" "artifacts\weblens-${{ github.sha }}-windows-amd64.zip" "${remote}:C:/ProgramData/WebLens/incoming/"
           if ($LASTEXITCODE -ne 0) { throw 'Could not upload release' }
           $release = "artifacts\weblens-${{ github.sha }}-windows-amd64.zip"
           $releaseSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $release).Hash
