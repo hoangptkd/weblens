@@ -1,6 +1,7 @@
 package postgres
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -44,7 +45,7 @@ func applyMigration(ctx context.Context, connection *pgx.Conn, path string) erro
 		return fmt.Errorf("read migration %s: %w", path, err)
 	}
 	name := path[strings.LastIndex(path, "/")+1:]
-	checksum := sha256.Sum256(body)
+	expected := migrationChecksum(body)
 
 	transaction, err := connection.Begin(ctx)
 	if err != nil {
@@ -67,7 +68,6 @@ func applyMigration(ctx context.Context, connection *pgx.Conn, path string) erro
 	err = transaction.QueryRow(ctx,
 		"SELECT checksum_sha256 FROM crawler_schema_history WHERE version = $1", name,
 	).Scan(&existing)
-	expected := hex.EncodeToString(checksum[:])
 	if err == nil {
 		if existing != expected {
 			return fmt.Errorf("migration checksum mismatch for %s", name)
@@ -89,4 +89,10 @@ func applyMigration(ctx context.Context, connection *pgx.Conn, path string) erro
 		return fmt.Errorf("commit migration %s: %w", name, err)
 	}
 	return nil
+}
+
+func migrationChecksum(body []byte) string {
+	normalized := bytes.ReplaceAll(body, []byte("\r\n"), []byte("\n"))
+	checksum := sha256.Sum256(normalized)
+	return hex.EncodeToString(checksum[:])
 }
