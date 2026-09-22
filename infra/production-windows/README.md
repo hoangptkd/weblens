@@ -13,6 +13,7 @@ ZIPs with `deploy.ps1 -ReleaseZip <path> -Commit <sha> -ReleaseSha256 <sha256>`.
 The script verifies the archive, runs only the crawler PostgreSQL migration, health-checks all services,
 and returns to the previous junction on failure.
 
-Caddy listens on 443 with an internal certificate because the VPS has no WebLens
-domain and port 80 belongs to another application. Replace the IP site address
-with a domain and remove `tls internal` when public DNS is ready.
+Caddy serves `jobnext.top` and `www.jobnext.top` on port 443 with a publicly
+trusted certificate. Direct IP and loopback access keep an internal certificate
+for deployment health checks. Port 80 remains owned by the existing application,
+so WebLens does not install HTTP-to-HTTPS redirects.

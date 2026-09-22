@@ -3,8 +3,7 @@
 	auto_https disable_redirects
 }
 
-https://160.191.244.27, https://127.0.0.1 {
-	tls internal
+(weblens) {
 	encode zstd gzip
 
 	handle /api/* {
@@ -16,6 +15,10 @@ https://160.191.244.27, https://127.0.0.1 {
 		try_files {path} /index.html
 		file_server
 	}
+}
+
+jobnext.top, www.jobnext.top {
+	import weblens
 
 	log {
 		output file C:\ProgramData\WebLens\logs\caddy-access.log {
@@ -23,4 +26,9 @@ https://160.191.244.27, https://127.0.0.1 {
 			roll_keep 5
 		}
 	}
+}
+
+https://160.191.244.27, https://127.0.0.1 {
+	tls internal
+	import weblens
 }
