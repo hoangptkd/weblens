@@ -165,7 +165,7 @@ jobs:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: release
     runs-on: windows-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     environment:
       name: production
       url: ${{ vars.WEBLENS_PUBLIC_URL }}
@@ -196,7 +196,7 @@ jobs:
       - name: Upload and activate immutable release
         shell: pwsh
         run: |
-          $ssh = @('-p', $env:VPS_PORT, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-i', "$HOME\.ssh\id_ed25519")
+          $ssh = @('-p', $env:VPS_PORT, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=20', '-i', "$HOME\.ssh\id_ed25519")
           $remote = "$env:VPS_USER@$env:VPS_HOST"
           & ssh @ssh $remote 'powershell.exe -NoProfile -Command "New-Item -ItemType Directory -Force C:\ProgramData\WebLens\incoming | Out-Null"'
           if ($LASTEXITCODE -ne 0) { throw 'Could not prepare remote release directory' }
