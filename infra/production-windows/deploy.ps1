@@ -64,8 +64,8 @@ try {
         & (Join-Path $current 'infra\production-windows\run-service.ps1') 'crawler-migrate-postgres'
         if ($LASTEXITCODE -ne 0) { throw 'Crawler PostgreSQL migration failed' }
         foreach ($name in $serviceNames) { Start-Service -Name $name }
-        Wait-Health 'http://127.0.0.1:8081/health/ready'
-        Wait-Health 'http://127.0.0.1:8082/health/ready'
+        Wait-Health 'http://127.0.0.1:8081/health/ready' 90
+        Wait-Health 'http://127.0.0.1:8082/health/ready' 90
         Wait-Health 'http://127.0.0.1:8080/actuator/health' 90
         Wait-Health 'https://127.0.0.1/'
     } catch {
