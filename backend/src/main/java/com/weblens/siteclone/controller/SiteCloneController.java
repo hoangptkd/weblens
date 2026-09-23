@@ -7,6 +7,8 @@ import com.weblens.common.logging.CorrelationIdFilter;
 import com.weblens.siteclone.dto.CreateSiteCloneRequest;
 import com.weblens.siteclone.dto.SiteCloneResponse;
 import com.weblens.siteclone.dto.SiteCloneProgressResponse;
+import com.weblens.siteclone.dto.SiteCloneBrowserActionRequest;
+import com.weblens.siteclone.dto.SiteCloneBrowserSessionResponse;
 import jakarta.validation.constraints.Pattern;
 import com.weblens.siteclone.service.SiteCloneService;
 import com.weblens.capture.dto.CaptureArtifactContent;
@@ -34,6 +36,7 @@ import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.validation.annotation.Validated;
 import com.weblens.siteclone.model.SiteCloneStatus;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -129,6 +132,72 @@ public class SiteCloneController {
         );
         return ResponseEntity.status(result.newlyAccepted() ? HttpStatus.ACCEPTED : HttpStatus.OK)
                 .body(result.response());
+    }
+
+    @PostMapping("/{siteCloneId}/browser-session")
+    @Operation(summary = "Open an ephemeral owner-scoped browser login session")
+    ResponseEntity<SiteCloneBrowserSessionResponse> startBrowserSession(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable UUID siteCloneId
+    ) {
+        return ResponseEntity.status(HttpStatus.CREATED)
+                .body(siteClones.startBrowserSession(AuthenticatedUserId.from(jwt), siteCloneId));
+    }
+
+    @GetMapping("/{siteCloneId}/browser-session")
+    @Operation(summary = "Get the current browser login session state")
+    SiteCloneBrowserSessionResponse getBrowserSession(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable UUID siteCloneId
+    ) {
+        return siteClones.getBrowserSession(AuthenticatedUserId.from(jwt), siteCloneId);
+    }
+
+    @GetMapping("/{siteCloneId}/browser-session/screenshot")
+    @Operation(summary = "Get the latest browser login session screenshot")
+    ResponseEntity<byte[]> getBrowserSessionScreenshot(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable UUID siteCloneId
+    ) {
+        byte[] screenshot = siteClones.getBrowserSessionScreenshot(
+                AuthenticatedUserId.from(jwt), siteCloneId
+        );
+        return ResponseEntity.ok()
+                .contentType(MediaType.IMAGE_JPEG)
+                .contentLength(screenshot.length)
+                .cacheControl(CacheControl.noStore())
+                .header(HttpHeaders.CONTENT_DISPOSITION, "inline; filename=browser-session.jpg")
+                .header("X-Content-Type-Options", "nosniff")
+                .body(screenshot);
+    }
+
+    @PostMapping("/{siteCloneId}/browser-session/actions")
+    @Operation(summary = "Send a bounded mouse or keyboard action to the browser login session")
+    SiteCloneBrowserSessionResponse browserAction(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable UUID siteCloneId,
+            @Valid @RequestBody SiteCloneBrowserActionRequest request
+    ) {
+        return siteClones.browserAction(AuthenticatedUserId.from(jwt), siteCloneId, request);
+    }
+
+    @PostMapping("/{siteCloneId}/browser-session/ready")
+    @Operation(summary = "Confirm login and release the clone renderer")
+    SiteCloneBrowserSessionResponse readyBrowserSession(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable UUID siteCloneId
+    ) {
+        return siteClones.readyBrowserSession(AuthenticatedUserId.from(jwt), siteCloneId);
+    }
+
+    @DeleteMapping("/{siteCloneId}/browser-session")
+    @Operation(summary = "Close the ephemeral browser login session")
+    ResponseEntity<Void> closeBrowserSession(
+            @AuthenticationPrincipal Jwt jwt,
+            @PathVariable UUID siteCloneId
+    ) {
+        siteClones.closeBrowserSession(AuthenticatedUserId.from(jwt), siteCloneId);
+        return ResponseEntity.noContent().build();
     }
 
     @GetMapping("/{siteCloneId}/artifacts/{artifactId}")

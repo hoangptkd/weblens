@@ -25,7 +25,6 @@ type pageStore interface {
 type Engine struct {
 	store         pageStore
 	fetcher       *Fetcher
-	robots        *RobotsCache
 	workers       int
 	pollInterval  time.Duration
 	leaseDuration time.Duration
@@ -43,7 +42,7 @@ func NewEngine(
 	logger *slog.Logger,
 ) *Engine {
 	return &Engine{
-		store: store, fetcher: fetcher, robots: NewRobotsCache(fetcher, "WebLensCrawler"),
+		store: store, fetcher: fetcher,
 		workers: workers, pollInterval: pollInterval, leaseDuration: leaseDuration,
 		hostDelay: hostDelay, backlogAge: backlogAge, logger: logger,
 	}
@@ -146,15 +145,8 @@ func (e *Engine) process(parent context.Context, lease model.PageLease) {
 			}
 		}
 	}()
-	result := model.PageResult{FinalURL: lease.NormalizedURL, ObservedAt: time.Now().UTC()}
-	if !e.robots.Allowed(ctx, lease.NormalizedURL, lease.Hostname, lease.MaxRedirects) {
-		result.FetchOutcome = "SKIPPED"
-		result.ErrorCode = "ROBOTS_DISALLOWED"
-		result.ErrorMessage = "The target robots policy disallows this page."
-	} else {
-		fetched := e.fetcher.Fetch(ctx, lease.NormalizedURL, lease.Hostname, lease.MaxResponseBytes, lease.MaxRedirects)
-		result = buildResult(lease, fetched)
-	}
+	fetched := e.fetcher.Fetch(ctx, lease.NormalizedURL, lease.Hostname, lease.MaxResponseBytes, lease.MaxRedirects)
+	result := buildResult(lease, fetched)
 	cancel()
 	<-heartbeatDone
 	if err := e.store.CommitPageResult(parent, lease, result); err != nil && !errors.Is(err, model.ErrStaleLease) {

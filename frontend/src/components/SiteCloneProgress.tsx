@@ -1,6 +1,5 @@
 import { Check, Copy, RefreshCw, Search } from 'lucide-react'
 import { useState } from 'react'
-import { Link } from 'react-router-dom'
 import { webLensService } from '../api/webLensApiService'
 import type { SiteClone, SiteClonePageStatus, SiteCloneProgressPage } from '../domain/types'
 import { useAsyncData } from '../hooks/useAsyncData'
@@ -121,15 +120,6 @@ export function SiteCloneProgress({ clone }: { clone: SiteClone }) {
       <button type="button" className="button button--secondary button--small" onClick={() => { setCursors([-1]); setReload((value) => value + 1) }}>Về đầu / cập nhật</button>
     </nav>
     <p className="render-monitor__freshness">Bản chụp: {date(data?.observedAt)} · cập nhật job: {date(data?.updatedAt)}. Bộ lọc đang chạy có thể thay đổi; về đầu để xem trang vừa hoàn tất.</p>
-    <details className="render-monitor__logs"><summary>Tra log và thông tin chẩn đoán</summary>
-      <p>Log nằm tại Capture Worker. Tìm theo <code>siteCloneRequestId</code>, thêm <code>pageId</code> để khoanh vùng trang và <code>attempt</code> để phân biệt lần thử.</p>
-      <button type="button" className="button button--secondary button--small" onClick={() => void copy(diagnostic())}><Copy aria-hidden="true" />Sao chép chẩn đoán job</button>
-      <pre>{diagnostic()}</pre>
-      <p>Ví dụ PowerShell, chạy từ thư mục project đang dùng Compose:</p>
-      <pre>{`docker compose -f infra/compose.yml logs --since 1h --tail 10000 capture-worker | Select-String -SimpleMatch '${clone.id}'`}</pre>
-      <Link to={`/app/scans/${clone.scanId}`}>Mở scan nguồn để kiểm tra bước khám phá</Link>
-      <p>Đây là trạng thái hiện tại, không phải lịch sử đầy đủ từng event. Không đưa log thô, cookie hoặc nội dung website vào giao diện.</p>
-    </details>
     <p role="status" className="render-monitor__copy-status">{copyMessage}</p>
   </section>
 }

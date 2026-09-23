@@ -1,5 +1,9 @@
 # ADR-007 — Tích hợp Pagesource để tạo bản clone tĩnh từ browser capture
 
+> Bổ sung: ADR-011 cho phép Design Clone dùng cookie trong BrowserContext tạm thời
+> sau khi owner tự đăng nhập. Quy tắc không **lưu** cookie, authorization header,
+> form value và XHR/fetch body của ADR này vẫn giữ nguyên.
+
 Trạng thái: Accepted revision 1 ngày 2026-09-13; revision 2 và baseline workload,
 database/runtime được người dùng chấp thuận triển khai ngày 2026-09-18; revision 3
 Design Clone được chấp thuận qua TASK-018 ngày 2026-09-20.

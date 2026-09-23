@@ -93,6 +93,12 @@ export interface SiteBundleFile {
   body: Buffer
 }
 
+export interface SiteResourceGap {
+  sourceUrl: string
+  resourceType: string
+  reason: string
+}
+
 export interface SitePageBundle {
   schemaVersion: 1
   pageId: string
@@ -100,6 +106,7 @@ export interface SitePageBundle {
   publicFinalUrl: string
   mainPath: string
   capturedAt: string
+  resourceGaps?: SiteResourceGap[]
   design?: {
     locale: string
     semanticRole: import('./design-clone.js').SemanticRole
@@ -116,6 +123,8 @@ export interface CapturePageOptions {
   includeSiteBundle?: boolean
   preserveUnmatchedReferences?: boolean
   captureScreenshot?: boolean
+  browserContext?: import('playwright').BrowserContext
+  browserVersion?: string
 }
 
 export interface RenderedMetadata {

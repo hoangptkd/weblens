@@ -109,10 +109,16 @@ services:
         condition: service_healthy
 
   capture-worker:
+    init: true
+    tmpfs:
+      - /run/weblens-browser:size=268435456,mode=1777
     build:
       context: ../capture-worker
     environment:
       CAPTURE_PORT: 8082
+      CAPTURE_BROWSER_ENGINE: ${CAPTURE_BROWSER_ENGINE:-camoufox}
+      CAPTURE_BROWSER_HEADLESS: ${CAPTURE_BROWSER_HEADLESS:-true}
+      CAPTURE_BROWSER_STEALTH: ${CAPTURE_BROWSER_STEALTH:-false}
       CAPTURE_DATABASE_URL: postgresql://${CAPTURE_POSTGRES_USER:-weblens_capture}:${CAPTURE_POSTGRES_PASSWORD:-weblens-capture-local-only}@capture-postgres:5432/${CAPTURE_POSTGRES_DB:-weblens_capture}
       CLICKHOUSE_URL: http://clickhouse:8123
       CLICKHOUSE_CAPTURE_DATABASE: ${CLICKHOUSE_CAPTURE_DATABASE:-weblens_capture_analytics}

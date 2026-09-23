@@ -13,6 +13,8 @@ import com.weblens.scan.service.ScanService;
 import com.weblens.siteclone.dto.CreateSiteCloneRequest;
 import com.weblens.siteclone.dto.SiteCloneResponse;
 import com.weblens.siteclone.dto.SiteCloneProgressResponse;
+import com.weblens.siteclone.dto.SiteCloneBrowserActionRequest;
+import com.weblens.siteclone.dto.SiteCloneBrowserSessionResponse;
 import com.weblens.siteclone.client.SiteCloneReportClient;
 import com.weblens.capture.dto.CaptureArtifactContent;
 import com.weblens.siteclone.entity.SiteCloneRequestEntity;
@@ -34,13 +36,18 @@ import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @Service
 @Transactional(readOnly = true)
 public class SiteCloneService {
 
+    private static final Logger LOG = LoggerFactory.getLogger(SiteCloneService.class);
     private static final String OPERATION = "create-site-clone-v1";
     private static final int MAX_PAGE_SIZE = 100;
 
@@ -223,6 +230,56 @@ public class SiteCloneService {
         return reports.getArtifact(ownerId, siteCloneId, artifactId);
     }
 
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    public SiteCloneBrowserSessionResponse startBrowserSession(UUID ownerId, UUID siteCloneId) {
+        SiteCloneRequestEntity clone = requireOwnedClone(ownerId, siteCloneId);
+        if (clone.getStatus().isTerminal() || clone.getStatus() == SiteCloneStatus.CANCEL_REQUESTED) {
+            throw new ConflictException(
+                    "SITE_CLONE_NOT_ACTIVE",
+                    "A browser login session can only be opened while the clone is active."
+            );
+        }
+        return reports.startBrowserSession(ownerId, siteCloneId, clone.getTargetUrl());
+    }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    public SiteCloneBrowserSessionResponse getBrowserSession(UUID ownerId, UUID siteCloneId) {
+        requireOwnedClone(ownerId, siteCloneId);
+        SiteCloneBrowserSessionResponse response = reports.getBrowserSession(ownerId, siteCloneId);
+        if (response == null) {
+            throw new NotFoundException("BROWSER_SESSION_NOT_FOUND", "The browser session does not exist.");
+        }
+        return response;
+    }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    public byte[] getBrowserSessionScreenshot(UUID ownerId, UUID siteCloneId) {
+        requireOwnedClone(ownerId, siteCloneId);
+        return reports.getBrowserSessionScreenshot(ownerId, siteCloneId);
+    }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    public SiteCloneBrowserSessionResponse browserAction(
+            UUID ownerId,
+            UUID siteCloneId,
+            SiteCloneBrowserActionRequest request
+    ) {
+        requireOwnedClone(ownerId, siteCloneId);
+        return reports.browserAction(ownerId, siteCloneId, request.toAction());
+    }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    public SiteCloneBrowserSessionResponse readyBrowserSession(UUID ownerId, UUID siteCloneId) {
+        requireOwnedClone(ownerId, siteCloneId);
+        return reports.readyBrowserSession(ownerId, siteCloneId);
+    }
+
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
+    public void closeBrowserSession(UUID ownerId, UUID siteCloneId) {
+        requireOwnedClone(ownerId, siteCloneId);
+        reports.closeBrowserSession(ownerId, siteCloneId);
+    }
+
     @Transactional
     public CancelResult cancel(UUID ownerId, UUID siteCloneId, UUID correlationId) {
         currentUsers.requireActive(ownerId);
@@ -240,6 +297,7 @@ public class SiteCloneService {
             return new CancelResult(toResponse(clone), false);
         }
         siteClones.saveAndFlush(clone);
+        closeBrowserSessionAfterCommit(ownerId, siteCloneId);
         if (previous != SiteCloneStatus.WAITING_FOR_SCAN) {
             messages.enqueue(new MessageEnvelope<>(
                     UUID.randomUUID(), "SITE_CLONE", clone.getId(), clone.getVersion(),
@@ -248,6 +306,27 @@ public class SiteCloneService {
             ));
         }
         return new CancelResult(toResponse(clone), true);
+    }
+
+    private void closeBrowserSessionAfterCommit(UUID ownerId, UUID siteCloneId) {
+        Runnable close = () -> {
+            try {
+                reports.closeBrowserSession(ownerId, siteCloneId);
+            } catch (RuntimeException exception) {
+                LOG.warn("Browser session cleanup failed after site-clone cancellation: siteCloneId={}, errorType={}",
+                        siteCloneId, exception.getClass().getSimpleName());
+            }
+        };
+        if (!TransactionSynchronizationManager.isSynchronizationActive()) {
+            close.run();
+            return;
+        }
+        TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+            @Override
+            public void afterCommit() {
+                close.run();
+            }
+        });
     }
 
     private String requireIdempotencyKey(String raw) {
@@ -261,6 +340,12 @@ public class SiteCloneService {
             );
         }
         return value;
+    }
+
+    private SiteCloneRequestEntity requireOwnedClone(UUID ownerId, UUID siteCloneId) {
+        currentUsers.requireActive(ownerId);
+        return siteClones.findByIdAndOwnerId(siteCloneId, ownerId)
+                .orElseThrow(SiteCloneService::notFound);
     }
 
     private static WebsiteTarget parseTarget(String rawUrl) {

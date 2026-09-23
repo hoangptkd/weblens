@@ -25,7 +25,8 @@ giao tiếp nội bộ.
 **Tiêu chí chấp nhận:** Không service nào đọc/ghi trực tiếp bảng private của
 service khác; không có cross-service foreign key/transaction; opaque identifiers
 được validate; caller service được authenticate/authorize; credential người dùng
-không được chuyển cho crawler hoặc browser worker.
+không được chuyển cho crawler. Capture Worker chỉ nhận input tương tác trong phiên
+owner-scoped theo CAP-006 và không persist/log input, cookie hoặc token.
 
 **Trường hợp biên:** ID hợp lệ nhưng sai owner, replay command, credential rotation,
 service account bị revoke và dữ liệu projection lệch source.
@@ -111,7 +112,7 @@ batch, version đến sai thứ tự, `too many parts`, disk pressure, retention
 
 ## CAP-002 — Capture rendered evidence
 
-**Description:** An isolated Playwright/Chromium worker captures final rendered HTML/DOM, a screenshot, eligible resources, and bounded network metadata.
+**Description:** An isolated Playwright-controlled Camoufox worker captures final rendered HTML/DOM, a screenshot, eligible resources, and bounded network metadata. Chromium remains a manually selectable engine.
 
 **Acceptance criteria:** Browser timeout and resource limits apply; the final URL and collection context are recorded; API-process stability does not depend on browser-process stability; sensitive headers and payloads are excluded by default.
 
@@ -192,6 +193,28 @@ orphan object, archive partial/expired và internal link tới page thất bại
 thời gian job 7 ngày, archive 7 ngày, metadata 30 ngày, chỉ same-origin. Có ít
 nhất một page thành công thì cancellation/lỗi phần còn lại có thể phát hành
 `PARTIAL`; không có page thành công thì `FAILED` hoặc `CANCELLED`.
+
+## CAP-006 — Phiên đăng nhập tạm thời và DOM động cho Design Clone
+
+**Mô tả:** Owner có thể mở một browser session do WebLens quản lý, tự nhập thông
+tin đăng nhập/OTP và xác nhận tiếp tục. Renderer dùng cookie trong cùng context và
+thử bounded scroll/click load-more/hover trước khi đóng gói.
+
+**Tiêu chí chấp nhận:** Control Plane authorize owner cho mọi status/screenshot/
+action; session chỉ ở RAM, tối đa một session/process và tự xóa sau 10 phút;
+worker restart yêu cầu login lại; response/log/database/object không chứa phím
+nhập, cookie hay authorization header; form value bị xóa khỏi HTML archive; page
+deadline, SSRF, redirect, byte và resource budget vẫn áp dụng. Scan không có page
+thành công vẫn dispatch để root fallback có thể render. Crawler không cưỡng chế
+`robots.txt` theo quyết định operator nhưng không vượt access control.
+
+**Trường hợp biên:** OAuth popup, session timeout trong lúc nhập OTP, sai owner,
+worker restart, page mở vô hạn, nút phá hoại giả dạng load-more, CAPTCHA/WAF và
+Cloudflare. ADR-012 bổ sung thử nghiệm local headed/stealth; không có solver,
+không bảo đảm truy cập được. Theo yêu cầu thử nghiệm, không thêm kiểm tra nội dung
+trước xuất ZIP: archive có thể vẫn chứa challenge, kể cả khi job publish thành công.
+ADR-015 chọn Camoufox mặc định cho local/VPS Windows-native, vẫn giữ SafeProxy,
+phạm vi session, timeout/cleanup và smoke test. Chromium chỉ dùng khi được chọn rõ.
 
 ## Deferred requirements
 

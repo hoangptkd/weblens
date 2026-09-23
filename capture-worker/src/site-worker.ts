@@ -20,6 +20,7 @@ import {
 } from './site-archive.js'
 import { SiteCloneDatabase, type ClaimedSitePage, type ClaimedSitePhase } from './site-database.js'
 import type { CaptureCommandPayload, SitePageBundle } from './types.js'
+import type { InteractiveBrowserSessionManager } from './browser-session.js'
 
 export class SiteCloneWorker {
   private running = true
@@ -29,6 +30,7 @@ export class SiteCloneWorker {
     private readonly config: Config,
     private readonly database: SiteCloneDatabase,
     private readonly storage: ObjectStorage,
+    private readonly browserSessions: InteractiveBrowserSessionManager,
   ) {
     this.crawler = new CrawlerReportClient(config)
   }
@@ -96,6 +98,18 @@ export class SiteCloneWorker {
     const seenPaths = new Set<string>()
     let ordinal = 0
     const targets: import('./site-database.js').SiteTargetInput[] = []
+    if (selection.selected.length === 0) {
+      const localPath = sitePagePath(job.rootUrl, job.rootUrl, job.id)
+      seenPaths.add(localPath.toLowerCase())
+      targets.push({
+        pageId: job.id,
+        ordinal,
+        publicUrl: sanitizeForDatabase(job.rootUrl),
+        urlSha256: rawUrlHash(job.rootUrl),
+        localPath,
+      })
+      ordinal += 1
+    }
     for (const candidate of selection.selected) {
       let localPath = sitePagePath(job.rootUrl, candidate.normalizedUrl, candidate.page.id)
       while (seenPaths.has(localPath.toLowerCase())) localPath = `pages/${candidate.page.id}-${ordinal}.html`
@@ -109,7 +123,7 @@ export class SiteCloneWorker {
       })
       ordinal += 1
     }
-    for (const rejection of selection.rejected) {
+    for (const rejection of selection.selected.length === 0 ? [] : selection.rejected) {
       const normalizedUrl = rejection.normalizedUrl || rejection.page.finalUrl || rejection.page.url
       let localPath = `rejected/${rejection.page.id}.html`
       while (seenPaths.has(localPath.toLowerCase())) localPath = `rejected/${rejection.page.id}-${ordinal}.html`
@@ -164,20 +178,26 @@ export class SiteCloneWorker {
     let result: Awaited<ReturnType<typeof capturePage>> | null = null
     let uploaded: import('./types.js').StoredObject | null = null
     try {
-      const target = await this.crawler.getPage(work.ownerId, work.pageId)
+      const target = work.pageId === work.jobId
+        ? fallbackDesignPage(work, work.publicUrl)
+        : await this.crawler.getPage(work.ownerId, work.pageId)
       const targetUrl = target.finalUrl || target.url
       if (!targetUrl || new URL(targetUrl).origin !== new URL(work.rootUrl).origin) {
         throw new Error('SITE_PAGE_ORIGIN_CHANGED')
       }
+      const sessionExpected = this.browserSessions.status(work.ownerId, work.jobId) !== null
+      const session = await this.browserSessions.waitForReady(work.ownerId, work.jobId, 10 * 60 * 1_000)
+      if (sessionExpected && !session) throw new Error('BROWSER_SESSION_NOT_READY')
       result = await capturePage(captureCommand(work, targetUrl), {
         mainPath: work.localPath,
         contentAddressedResources: true,
         includeSiteBundle: true,
         preserveUnmatchedReferences: true,
         captureScreenshot: false,
+        ...(session ? { browserContext: session.context, browserVersion: session.browserVersion } : {}),
       })
       const partial = result.reconstruction.siteBundle
-      if (!partial) throw new Error('SITE_PAGE_BUNDLE_MISSING')
+      if (!partial) throw new Error(result.reconstruction.failureCode ?? 'SITE_PAGE_BUNDLE_MISSING')
       const descriptor = describeDesignPage(work.rootUrl, target)
       const bundle: SitePageBundle = {
         ...partial,
@@ -306,6 +326,7 @@ export class SiteCloneWorker {
       }
       await Promise.all(uploaded.map((object) => this.storage.verify(object)))
       await this.database.publishArtifacts(job, artifactInputs)
+      await this.browserSessions.close(job.ownerId, job.id)
       await Promise.allSettled(staged.map((object) => this.storage.delete(object)))
       log('info', 'site clone archive published', {
         siteCloneRequestId: job.id,
@@ -328,9 +349,11 @@ export class SiteCloneWorker {
 
   private async cancellationLoop(): Promise<void> {
     while (this.running) {
-      await this.database.reconcileCancellations().catch((error: unknown) => log('warn', 'site clone cancellation reconciliation failed', {
-        errorType: errorName(error),
-      }))
+      const jobs = await this.database.reconcileCancellations().catch((error: unknown) => {
+        log('warn', 'site clone cancellation reconciliation failed', { errorType: errorName(error) })
+        return []
+      })
+      await Promise.allSettled(jobs.map((job) => this.browserSessions.close(job.ownerId, job.id)))
       await delay(this.config.siteClonePollMillis)
     }
   }
@@ -399,7 +422,7 @@ function captureCommand(work: ClaimedSitePage, targetUrl: string): CaptureComman
     targetUrl,
     viewportWidth: 1365,
     viewportHeight: 768,
-    timeoutSeconds: 30,
+    timeoutSeconds: 60,
     maxTotalBytes: 52_428_800,
     maxResourceBytes: 10_485_760,
     maxNetworkRequests: 500,
@@ -415,6 +438,25 @@ function captureCommand(work: ClaimedSitePage, targetUrl: string): CaptureComman
       schemaOrgTypes: [],
       observedAt: null,
     },
+  }
+}
+
+function fallbackDesignPage(work: ClaimedSitePage, targetUrl: string): import('./design-clone.js').DesignPageInput {
+  return {
+    id: work.pageId,
+    url: targetUrl,
+    finalUrl: targetUrl,
+    outcome: 'success',
+    statusCode: 200,
+    contentType: 'text/html',
+    canonicalUrl: '',
+    htmlLang: '',
+    hreflang: [],
+    h1: [],
+    h2: [],
+    schemaOrgTypes: [],
+    scripts: 0,
+    stylesheets: 0,
   }
 }
 

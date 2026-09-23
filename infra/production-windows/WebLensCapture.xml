@@ -1,7 +1,7 @@
 <service>
   <id>WebLensCapture</id>
   <name>WebLens Capture Worker</name>
-  <description>WebLens Playwright Capture Worker</description>
+  <description>WebLens Capture Worker with Camoufox browser</description>
   <executable>powershell.exe</executable>
   <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\WebLens\current\infra\production-windows\run-service.ps1 capture</arguments>
   <startmode>Automatic</startmode>

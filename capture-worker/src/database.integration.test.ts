@@ -287,6 +287,8 @@ test('site clone migration, phase retry, page fencing, cancellation partial và 
     assert.ok(winningPage)
     assert.equal(winningPage.pageId, stalePage.pageId)
     assert.ok(winningPage.leaseGeneration > stalePage.leaseGeneration)
+    const retryProgress = await sites.getProgress(command.payload.ownerId, command.aggregateId, -1, 50, 'RENDERING', '')
+    assert.equal(retryProgress?.items[0]?.failureCode, null)
     const bundleObject = storedObject('site-page-bundle', Buffer.from('{"bundle":true}'))
     await assert.rejects(
       sites.completePage(stalePage, bundleObject, 15),

@@ -31,6 +31,11 @@ test('rewriteSiteNavigation chỉ tạo link local cho page thực sự có rout
 test('buildSiteArchives deduplicate asset và giữ mỗi shard dưới budget', async () => {
   const first = bundle('page-1', 'https://example.com/', 'index.html', 'A')
   const second = bundle('page-2', 'https://example.com/about', 'pages/page-2.html', 'B')
+  first.resourceGaps = [{
+    sourceUrl: 'https://example.com/broken.webp?token=private',
+    resourceType: 'image',
+    reason: 'HTTP_FAILURE',
+  }]
   first.files.push({
     kind: 'RESOURCE', localPath: 'assets/shared.woff2', sourceUrl: 'https://example.com/shared.woff2',
     contentType: 'font/woff2', body: Buffer.from('x'.repeat(600)),
@@ -75,9 +80,17 @@ test('buildSiteArchives deduplicate asset và giữ mỗi shard dưới budget',
     ).test(part.logicalFilename)))
     for (const part of build.parts) assert.ok((await stat(part.path)).size <= 2_048)
     const manifest = JSON.parse(build.manifest.toString('utf8')) as {
-      kind: string; pages: unknown[]; parts: Array<{ bytes: number; sha256: string }>
+      kind: string
+      completenessCode: string
+      resourceGaps: { count: number; reasonCounts: Record<string, number> }
+      pages: Array<{ pageId: string; resourceGaps?: Array<{ sourceUrl: string; reason: string }> }>
+      parts: Array<{ bytes: number; sha256: string }>
     }
     assert.equal(manifest.kind, 'DESIGN_SITE_ARCHIVE')
+    assert.equal(manifest.completenessCode, 'PARTIAL_RESOURCE_GAPS')
+    assert.deepEqual(manifest.resourceGaps, { count: 1, reasonCounts: { HTTP_FAILURE: 1 } })
+    assert.equal(manifest.pages[0]?.resourceGaps?.[0]?.reason, 'HTTP_FAILURE')
+    assert.doesNotMatch(JSON.stringify(manifest.pages[0]?.resourceGaps), /private/u)
     assert.equal(manifest.pages.length, 2)
     assert.equal(manifest.parts.length, build.parts.length)
     assert.ok(manifest.parts.every((part) => part.bytes > 0 && /^[0-9a-f]{64}$/u.test(part.sha256)))

@@ -31,6 +31,7 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 @ExtendWith(MockitoExtension.class)
 class SiteCloneServiceTest {
@@ -64,7 +65,16 @@ class SiteCloneServiceTest {
         given(siteClones.findByIdAndOwnerId(cloneId, ownerId)).willReturn(Optional.of(clone));
         given(siteClones.findOwnedForUpdate(cloneId, ownerId)).willReturn(Optional.of(clone));
 
-        SiteCloneService.CancelResult result = service.cancel(ownerId, cloneId, correlationId);
+        TransactionSynchronizationManager.initSynchronization();
+        SiteCloneService.CancelResult result;
+        try {
+            result = service.cancel(ownerId, cloneId, correlationId);
+            then(reports).should(never()).closeBrowserSession(ownerId, cloneId);
+            TransactionSynchronizationManager.getSynchronizations()
+                    .forEach(synchronization -> synchronization.afterCommit());
+        } finally {
+            TransactionSynchronizationManager.clearSynchronization();
+        }
 
         assertThat(result.newlyAccepted()).isTrue();
         assertThat(result.response().status()).isEqualTo(SiteCloneStatus.CANCELLED);
@@ -72,6 +82,7 @@ class SiteCloneServiceTest {
         order.verify(scans).cancelForSiteClone(ownerId, clone.getScanId(), correlationId);
         order.verify(siteClones).findOwnedForUpdate(cloneId, ownerId);
         then(messages).should(never()).enqueue(any());
+        then(reports).should().closeBrowserSession(ownerId, cloneId);
     }
 
     @Test
@@ -93,6 +104,18 @@ class SiteCloneServiceTest {
         assertThat(result.available()).isFalse();
         assertThat(result.phase()).isEqualTo("WAITING_FOR_SCAN");
         assertThat(result.items()).isEmpty();
+        then(reports).shouldHaveNoInteractions();
+    }
+
+    @Test
+    void browserSessionRequiresCloneOwnershipBeforeContactingWorker() {
+        UUID ownerId = UUID.randomUUID();
+        UUID cloneId = UUID.randomUUID();
+        given(siteClones.findByIdAndOwnerId(cloneId, ownerId)).willReturn(Optional.empty());
+
+        assertThatThrownBy(() -> service.startBrowserSession(ownerId, cloneId))
+                .isInstanceOf(com.weblens.common.exception.NotFoundException.class);
+
         then(reports).shouldHaveNoInteractions();
     }
 

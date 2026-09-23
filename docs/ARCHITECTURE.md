@@ -71,13 +71,14 @@ chia thành deployable riêng trong V1/V1.5.
 - Bản fork CrawlObserver ở repository và release boundary riêng.
 - Durable crawl execution, frontier, URL discovery/dedup và per-host scheduling.
 - Lease, heartbeat, retry, fencing và recovery cho page work.
-- DNS/IP/redirect SSRF policy, robots.txt, timeout, response-size và crawl bounds.
+- DNS/IP/redirect SSRF policy, timeout, response-size và crawl bounds. Theo
+  ADR-011, crawler không cưỡng chế `robots.txt`.
 - HTTP page evidence, parsing, basic metrics, links và deterministic findings có version.
 - Durable PostgreSQL analytics staging và bounded batch sink sang ClickHouse.
 - Report query contract cho page outcome/metrics/findings.
 - Durable outbox cho progress, partial result và terminal result.
 
-Normalizer, fetcher, parser, bounded pipeline, retry/politeness, robots/sitemap,
+Normalizer, fetcher, parser, bounded pipeline, retry/politeness, sitemap,
 ClickHouse client/batching và report intent của CrawlObserver được tái sử dụng sau
 contract test. In-memory manager/frontier, SQLite auth, managed ClickHouse
 subprocess, migration gốc, lossy batch buffer, Rod renderer, Cloudflare bypass và
@@ -86,7 +87,8 @@ TLS impersonation không được nhập.
 ### Playwright Capture Worker
 
 - Nhận capture command idempotently cho page đủ điều kiện.
-- Chạy Chromium trong isolation boundary có timeout và resource limits.
+- Chạy Camoufox mặc định trong isolation boundary có timeout và resource limits;
+  giữ Chromium như engine tùy chọn qua `CAPTURE_BROWSER_ENGINE=playwright`.
 - Thu rendered HTML, screenshot, bounded network metadata và eligible resource.
 - Redact secret/cookie/header, hash và upload artifact lớn vào S3/MinIO.
 - Persist capture metadata/outbox, batch network/resource facts sang ClickHouse;
@@ -104,6 +106,14 @@ TLS impersonation không được nhập.
   site-reconstruction jobs/pages hiện hữu; không tạo event store hoặc schema mới.
   Control Plane authorize trước khi chuyển tiếp, không giữ transaction database
   trong lúc gọi worker. UI poll 5 giây, phân trang keyset và tách render khỏi publish.
+- ADR-011 thêm browser session in-memory owner-scoped để user tự đăng nhập/nhập
+  OTP. Control Plane chỉ proxy screenshot/action sau authorization; cookie ở lại
+  trong BrowserContext và không được persist. Một session/process, TTL 10 phút.
+- ADR-012 thêm launcher dùng chung cho local headed/stealth thử nghiệm; mặc định
+  tắt stealth, không thay discovery hoặc thêm service. Docker dùng Xvfb sẵn có.
+- ADR-015 chọn Camoufox Firefox fork làm engine mặc định cho local và VPS
+  Windows-native; SeleniumBase đã gỡ. Không chạy browser REST server; SafeProxy,
+  context owner scope, TTL, download/SW policy và artifact pipeline vẫn giữ nguyên.
 
 Capture Worker không thực thi HTML/JavaScript trong Control Plane hay Crawler
 Service. Browser egress phải bị chặn ở network/container layer, không dựa vào Go
@@ -124,7 +134,8 @@ Bảng dưới đây là ownership map, không phải phê duyệt schema vật 
 
 `scan_id`, `website_id`, `owner_id` và capture/page IDs đi qua API dưới dạng opaque
 identifier. Chúng không tạo cross-service foreign key. Service nhận ID phải xác
-minh contract và scope phù hợp; Crawler/Capture không nhận user credential.
+minh contract và scope phù hợp. Crawler không nhận user credential; Capture Worker
+chỉ nhận phím nhập qua phiên tương tác owner-scoped và không persist/log giá trị.
 
 ClickHouse thuộc V1/V1.5 theo ADR-006, nhưng không giữ authorization, queue, lease,
 cancellation hoặc lifecycle. PostgreSQL và ClickHouse không có distributed
@@ -221,7 +232,8 @@ phải hiển thị rõ thay vì suy đoán failure chỉ vì một request nộ
 - Service-to-service authentication, authorization, replay protection và secret
   rotation là bắt buộc trước production.
 - Crawler kiểm tra URL scheme, DNS result và từng redirect; áp dụng global-unicast
-  policy, per-host concurrency/rate, robots và response bounds.
+  policy, per-host concurrency/rate và response bounds. Việc bỏ qua robots theo
+  ADR-011 không nới bất kỳ network-safety guard nào.
 - Capture Worker có network egress allow policy, sandbox, process kill timeout,
   CPU/RAM/disk/network quota và không mount credential không cần thiết.
 - Crawled HTML, header, URL, metadata và artifact đều không tin cậy. Không lưu raw
@@ -245,7 +257,8 @@ phải hiển thị rõ thay vì suy đoán failure chỉ vì một request nộ
 - Kafka, Redis, Kubernetes, service mesh hoặc multi-region orchestration.
 - OpenSearch hoặc datastore bổ sung ngoài PostgreSQL, ClickHouse và S3/MinIO.
 - Tách Identity, Website, Analysis hoặc Report thành service riêng.
-- Cloudflare bypass, anti-bot evasion hoặc TLS impersonation.
+- CAPTCHA solver, TLS impersonation và browser cloud; Camoufox theo ADR-015
+  không bảo đảm vượt Cloudflare.
 - V2 comparison/regression, V3 AI, V4 monitoring/alerts và các capability về sau.
 
 Mỗi thay đổi trên cần requirement, benchmark hoặc threat model phù hợp và một ADR

@@ -197,6 +197,39 @@ export const webLensService: WebLensService = {
       `/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/artifacts/${encodeURIComponent(artifactId)}`,
     )
   },
+
+  async startSiteCloneBrowserSession(siteCloneId) {
+    return apiRequest(`/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/browser-session`, {
+      method: 'POST',
+    })
+  },
+
+  async getSiteCloneBrowserSession(siteCloneId) {
+    return apiRequest(`/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/browser-session`)
+  },
+
+  async getSiteCloneBrowserScreenshot(siteCloneId) {
+    return apiBlobRequest(`/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/browser-session/screenshot`)
+  },
+
+  async sendSiteCloneBrowserAction(siteCloneId, action) {
+    return apiRequest(`/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/browser-session/actions`, {
+      method: 'POST',
+      body: JSON.stringify(action),
+    })
+  },
+
+  async readySiteCloneBrowserSession(siteCloneId) {
+    return apiRequest(`/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/browser-session/ready`, {
+      method: 'POST',
+    })
+  },
+
+  async closeSiteCloneBrowserSession(siteCloneId) {
+    await apiRequest(`/api/v1/site-clones/${encodeURIComponent(siteCloneId)}/browser-session`, {
+      method: 'DELETE',
+    })
+  },
 }
 
 function appendOptional(query: URLSearchParams, name: string, value?: string) {

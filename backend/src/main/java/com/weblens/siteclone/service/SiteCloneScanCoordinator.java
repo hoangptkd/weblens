@@ -37,8 +37,7 @@ public class SiteCloneScanCoordinator {
         if (clone == null) {
             return;
         }
-        if ((scan.getStatus() == ScanStatus.COMPLETED || scan.getStatus() == ScanStatus.PARTIAL_SUCCESS)
-                && scan.progress().succeeded() > 0) {
+        if (scan.getStatus() != ScanStatus.CANCELLED) {
             if (!clone.markReadyForDispatch(now)) {
                 return;
             }
@@ -58,9 +57,9 @@ public class SiteCloneScanCoordinator {
             return;
         }
         clone.failFromScan(
-                "SOURCE_SCAN_NOT_CLONEABLE",
-                "The automatically created scan did not produce a successful page.",
-                now
+            "SOURCE_SCAN_NOT_CLONEABLE",
+            "The automatically created scan was cancelled before cloning could start.",
+            now
         );
     }
 }

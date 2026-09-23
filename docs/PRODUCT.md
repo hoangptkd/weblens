@@ -55,6 +55,15 @@ bằng Capture Worker, deduplicate asset xuyên page và tạo archive download-
 không chứa screenshot. Người dùng không phải chọn scan. Baseline workload, schema
 và runtime đã được phê duyệt trong TASK-015; TASK-018 không đổi database schema.
 Tuyên bố sức chứa production vẫn phải dựa trên benchmark phần cứng thực tế.
+Từ 2026-09-22, ADR-011 bổ sung phiên browser đăng nhập tạm thời cho Design Clone
+và bounded scroll/click/hover. Phiên chỉ nằm trong RAM, một phiên trên worker,
+tối đa 10 phút; không lưu credential/cookie. ADR-012 cho phép thử nghiệm local
+headed/stealth, không cam kết vượt CAPTCHA/WAF/Cloudflare và không có solver.
+ADR-015 chọn Camoufox làm engine mặc định cho local và VPS Windows-native, gỡ
+SeleniumBase/CDP và giữ Chromium như lựa chọn thủ công. Không thêm deployable,
+không đổi database và không cam kết vượt mọi CAPTCHA/Cloudflare.
+Theo quyết định operator, crawler không cưỡng chế `robots.txt`, nhưng mọi giới hạn
+SSRF, redirect, tài nguyên và politeness vẫn giữ nguyên.
 
 ## Explicitly not V1
 

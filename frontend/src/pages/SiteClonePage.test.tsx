@@ -9,12 +9,40 @@ import { SiteClonePage } from './SiteClonePage'
 describe('SiteClonePage', () => {
   afterEach(() => vi.restoreAllMocks())
   beforeEach(() => {
+    Object.defineProperty(URL, 'createObjectURL', { configurable: true, value: vi.fn(() => 'blob:browser-session') })
+    Object.defineProperty(URL, 'revokeObjectURL', { configurable: true, value: vi.fn() })
     vi.spyOn(webLensService, 'getSiteCloneProgress').mockResolvedValue({
       available: false, jobId: 'clone-1', scanId: 'scan-internal-1', correlationId: null,
       phase: 'WAITING_FOR_SCAN', ingestionComplete: false, observedAt: '2026-09-21T06:00:00Z',
       updatedAt: null, startedAt: null, finishedAt: null, phaseAttemptCount: 0, phaseRetryAt: null,
       phaseLeaseExpired: false, terminalCode: null, counts: {}, activePages: [], items: [], nextAfter: null,
     })
+  })
+
+  it('mở phiên trình duyệt tạm thời khi website yêu cầu đăng nhập', async () => {
+    const clone = siteClone()
+    const browserSession = {
+      status: 'AWAITING_USER' as const,
+      currentUrl: 'https://example.com/login',
+      expiresAt: '2026-09-21T06:10:00Z',
+      viewportWidth: 1365,
+      viewportHeight: 768,
+    }
+    vi.spyOn(webLensService, 'listSiteClones').mockResolvedValue(siteClonePage([]))
+    vi.spyOn(webLensService, 'getSiteClone').mockResolvedValue(clone)
+    vi.spyOn(webLensService, 'startSiteClone').mockResolvedValue(clone)
+    const startBrowser = vi.spyOn(webLensService, 'startSiteCloneBrowserSession').mockResolvedValue(browserSession)
+    vi.spyOn(webLensService, 'getSiteCloneBrowserSession').mockResolvedValue(browserSession)
+    vi.spyOn(webLensService, 'getSiteCloneBrowserScreenshot').mockResolvedValue(new Blob(['jpeg']))
+    const user = userEvent.setup()
+    renderSiteClonePage()
+
+    await user.type(screen.getByLabelText('URL gốc'), 'https://example.com')
+    await user.click(screen.getByLabelText('Website yêu cầu đăng nhập, cookie hoặc OTP'))
+    await user.click(screen.getByRole('button', { name: /Scan và clone/i }))
+
+    expect(startBrowser).toHaveBeenCalledWith(clone.id)
+    expect(await screen.findByRole('heading', { name: 'Trình duyệt đăng nhập tạm thời' })).toBeInTheDocument()
   })
 
   it('chỉ yêu cầu URL và tự tạo workflow scan nội bộ', async () => {

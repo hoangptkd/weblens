@@ -1,5 +1,75 @@
 # Development
 
+## SeleniumBase Turnstile diagnostic finding — 2026-09-23
+
+An isolated reproduction against ShineShop returned Turnstile `600010` after a
+single checkbox click. Main document, Turnstile script and challenge requests
+returned HTTP 200; `/api/consent` was not requested. A comparison using the
+SeleniumBase default context/page also returned `600010`. Neither experiment
+demonstrated a working CAPTCHA fix. Production context isolation was unchanged.
+
+Cloudflare classifies `600xxx` as generic challenge failure / detected bot
+behavior; the precise rejected signal is not public. PAT HTTP 401 and some DNS
+probe errors are documented as expected and must not be treated as root causes.
+Browser clock was within a few seconds of the HTTP Date header. WebGL/WebGL2 were
+unavailable in the local container; testing ANGLE/OpenGL did not restore them.
+This is a compatibility observation, not proof of the reason for rejection.
+
+Capture/login pages now log `browser verification failed` with operation ID and
+only the six-digit code from a Cloudflare-script console warning. At most five
+distinct codes per page are recorded. No raw console text, challenge URL, token,
+cookie or form content is recorded. Absence of a log does not prove success:
+sites can suppress console warnings. There is no automatic solver or ZIP gate.
+
+References:
+- https://developers.cloudflare.com/turnstile/troubleshooting/client-side-errors/error-codes/
+- https://developers.cloudflare.com/cloudflare-challenges/troubleshooting/challenge-solve-issues/
+- https://github.com/seleniumbase/SeleniumBase/blob/master/examples/cdp_mode/playwright/ReadMe.md
+
+## Browser mặc định: Camoufox (ADR-015)
+
+`CAPTURE_BROWSER_ENGINE` mặc định là `camoufox` trên Docker local và VPS Windows.
+Worker dùng Camoufox 152.0.4-beta.28 qua `camoufox-js` 0.11.5, không chạy
+browser REST server và không persist profile. `CAPTURE_BROWSER_STEALTH` không áp
+dụng cho Camoufox vì fingerprint được xử lý trong Firefox fork. Windows service
+chạy headless; local Docker có thể đặt `CAPTURE_BROWSER_HEADLESS=false` để dùng Xvfb.
+
+Browser vẫn đi qua SafeProxy. Firefox preference bắt buộc loopback qua proxy;
+WebRTC bị chặn, TLS validation và site isolation không bị tắt. Context dùng
+`viewport: null` do giới hạn giao thức hiện tại; phiên đăng nhập trả viewport thực
+tế để UI ánh xạ click đúng với screenshot.
+
+Lần kiểm tra local 2026-09-23 trên ShineShop đã nhận `/api/consent` HTTP 200 và
+challenge biến mất sau một click, không thấy `600010`. Kết quả này không bảo đảm
+mỗi challenge/IP đều thành công. Muốn dùng Chromium, chọn
+`CAPTURE_BROWSER_ENGINE=playwright` rồi khởi động lại worker.
+
+## Browser headed/stealth thử nghiệm (ADR-012)
+
+SeleniumBase/CDP đã gỡ theo ADR-015. Không có bước tự giải CAPTCHA hoặc kiểm tra
+challenge trước khi xuất ZIP.
+
+Đặt `CAPTURE_BROWSER_HEADLESS=false` và `CAPTURE_BROWSER_STEALTH=true` trong
+`.env`, chạy `docker compose --env-file .env -f infra/compose.yml up -d --build
+capture-worker`. Hai cờ áp dụng cả capture thường và phiên đăng nhập. Docker
+dùng Xvfb để cấp màn hình ảo, người dùng vẫn thao tác qua ảnh trong WebLens.
+Mặc định repository là headless, không stealth. Đổi lại hai cờ rồi recreate worker
+để rollback; thao tác này đóng mọi phiên đăng nhập tạm trong worker.
+
+Fingerprint patches dùng plugin chính thức; không random UA/canvas, không tắt
+HTTPS validation, web security hoặc SSRF. Không thêm solver/proxy dịch vụ và không
+thay Go Crawler. Windows-native headed cần desktop session phù hợp; chưa bật trên
+VPS Windows Service. Không thêm content gate cho ZIP theo yêu cầu thử nghiệm.
+
+Smoke browser thật, không truy cập website bên ngoài hoặc dùng database:
+
+```powershell
+docker run --rm --init --network none --tmpfs /run/weblens-browser:size=268435456,mode=1777 -e WEBLENS_BROWSER_SMOKE=true --entrypoint xvfb-run weblens-capture-worker -a node --test dist/browser.test.js
+```
+
+Smoke kiểm tra tám cấu hình (ba engine), render fixture, screenshot, cookie isolation và
+private HTTPS bị chặn. Pass không có nghĩa Cloudflare đã chấp nhận.
+
 ## Theo dõi render và tra log Design Clone
 
 Trang chi tiết Design Clone có Render Monitor: snapshot mới mỗi 5 giây khi job
@@ -8,9 +78,9 @@ lọc/phân trang. `SUCCEEDED` nghĩa là đã tạo bundle ứng viên, không 
 được giữ trong ZIP cuối (còn deduplicate layout khi assembly). URL bị loại có
 trạng thái `CANCELLED` kèm reason code; không tính thành lỗi render.
 
-Chọn **Tra log và thông tin chẩn đoán** để sao chép `siteCloneRequestId`, `scanId`,
-`correlationId`; nút ở từng page thêm `pageId`, `attempt` và mã lỗi. Dùng shell
-trên máy đang chạy Compose, từ thư mục repository:
+Nút **Tra log** ở từng page sao chép `siteCloneRequestId`, `scanId`,
+`correlationId`, `pageId`, `attempt` và mã lỗi. Dùng shell trên máy đang chạy
+Compose, từ thư mục repository:
 
 ```powershell
 docker compose -f infra/compose.yml logs --since 1h --tail 10000 capture-worker | Select-String -SimpleMatch '<siteCloneRequestId>'

@@ -91,7 +91,7 @@ jobs:
           cache-dependency-path: capture-worker/package-lock.json
       - name: Verify capture worker
         working-directory: capture-worker
-        run: npm ci && npm test && npm run test:integration && npm run typecheck && npm run build
+        run: npm ci --ignore-scripts && npm test && npm run test:integration && npm run typecheck && npm run build
 
   frontend:
     runs-on: ubuntu-latest
@@ -143,11 +143,11 @@ jobs:
           go build -trimpath -ldflags='-s -w' -o weblens-crawler.exe ./cmd/weblens-crawler
           Pop-Location
           Push-Location capture-worker
-          npm ci
+          npm ci --ignore-scripts
           npm run build
           $env:PLAYWRIGHT_BROWSERS_PATH = '0'
           npx playwright install chromium
-          npm prune --omit=dev
+          npm prune --omit=dev --ignore-scripts
           Pop-Location
           Push-Location frontend
           npm ci

@@ -1,5 +1,24 @@
 # Thông báo phần mềm bên thứ ba
 
+## Camoufox 152.0.4-beta.28 và camoufox-js 0.11.5
+
+Firefox fork và JavaScript launcher dùng cho Capture Worker theo ADR-015, từ
+https://github.com/daijro/camoufox và https://github.com/apify/camoufox-js.
+Hai thành phần phát hành theo Mozilla Public License 2.0; toàn văn giấy phép nằm
+trong distribution upstream/package cài đặt. Docker dùng binary release chính
+thức có checksum cố định. WebLens không chép hoặc chạy CamoFox REST server của
+`jo-inc/camofox-browser`, không bật telemetry và không persist browser profile.
+Nguồn tương ứng với browser binary đã ghim:
+https://github.com/daijro/camoufox/tree/v152.0.4-beta.28.
+Nguồn launcher `camoufox-js` 0.11.5:
+https://github.com/apify/camoufox-js.
+
+## playwright-extra 4.3.6 và puppeteer-extra-plugin-stealth 2.11.2
+
+Adapter Playwright và browser patches cho Chromium tùy chọn theo ADR-012, từ repository
+`berstend/puppeteer-extra`, giấy phép MIT. Toàn văn giấy phép được giữ trong các
+package cài đặt. Không sao chép mã từ HasData/BrowserStack vào sản phẩm.
+
 ## Pagesource 0.1.2
 
 WebLens tham khảo và điều chỉnh hành vi ánh xạ URL thành đường dẫn local, suy luận

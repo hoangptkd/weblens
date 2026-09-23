@@ -7,6 +7,9 @@ The release layout is `C:\WebLens\releases\<commit>`, with `C:\WebLens\current`
 pointing to the active release. Secrets live only in
 `C:\ProgramData\WebLens\weblens.env`; grant read access only to the four service
 virtual accounts, Administrators, and SYSTEM.
+The Capture Worker uses pinned Camoufox by default; its Windows binary is
+checksum-verified and included in each release. Chromium is retained and can
+be selected explicitly with `CAPTURE_BROWSER_ENGINE=playwright`.
 
 Run `bootstrap.ps1` once after the first release junction exists. Deploy later
 ZIPs with `deploy.ps1 -ReleaseZip <path> -Commit <sha> -ReleaseSha256 <sha256>`.

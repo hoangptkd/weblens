@@ -7,6 +7,9 @@ import com.weblens.common.exception.ApiException;
 import com.weblens.common.exception.NotFoundException;
 import com.weblens.siteclone.dto.SiteCloneResponse;
 import com.weblens.siteclone.dto.SiteCloneProgressResponse;
+import com.weblens.siteclone.dto.SiteCloneBrowserSessionResponse;
+import com.weblens.common.exception.ConflictException;
+import java.util.Map;
 import java.security.MessageDigest;
 import java.security.NoSuchAlgorithmException;
 import java.util.HexFormat;
@@ -125,6 +128,121 @@ public class SiteCloneReportClient {
         return new CaptureArtifactContent(
                 body, type.toString(), etag, filename(response.getHeaders())
         );
+    }
+
+    public SiteCloneBrowserSessionResponse startBrowserSession(
+            UUID ownerId,
+            UUID siteCloneId,
+            String targetUrl
+    ) {
+        try {
+            return client.post()
+                    .uri("/internal/v1/browser-sessions/site-clones/{id}", siteCloneId)
+                    .header("X-WebLens-Service-Token", properties.serviceToken())
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(Map.of("ownerId", ownerId, "targetUrl", targetUrl))
+                    .retrieve().body(SiteCloneBrowserSessionResponse.class);
+        } catch (RestClientResponseException exception) {
+            throw browserSessionFailure(exception);
+        } catch (RestClientException exception) {
+            throw unavailable(exception);
+        }
+    }
+
+    public SiteCloneBrowserSessionResponse getBrowserSession(UUID ownerId, UUID siteCloneId) {
+        try {
+            return client.get()
+                    .uri(uri -> uri.path("/internal/v1/browser-sessions/site-clones/{id}")
+                            .queryParam("ownerId", ownerId).build(siteCloneId))
+                    .header("X-WebLens-Service-Token", properties.serviceToken())
+                    .retrieve().body(SiteCloneBrowserSessionResponse.class);
+        } catch (RestClientResponseException exception) {
+            if (exception.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) return null;
+            throw browserSessionFailure(exception);
+        } catch (RestClientException exception) {
+            throw unavailable(exception);
+        }
+    }
+
+    public byte[] getBrowserSessionScreenshot(UUID ownerId, UUID siteCloneId) {
+        try {
+            ResponseEntity<byte[]> response = client.get()
+                    .uri(uri -> uri.path("/internal/v1/browser-sessions/site-clones/{id}/screenshot")
+                            .queryParam("ownerId", ownerId).build(siteCloneId))
+                    .header("X-WebLens-Service-Token", properties.serviceToken())
+                    .retrieve().toEntity(byte[].class);
+            byte[] body = response.getBody();
+            if (body == null || body.length == 0 || body.length > 5_242_880
+                    || !MediaType.IMAGE_JPEG.equals(response.getHeaders().getContentType())) {
+                throw unavailable(null);
+            }
+            return body;
+        } catch (RestClientResponseException exception) {
+            if (exception.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) {
+                throw new NotFoundException("BROWSER_SESSION_NOT_FOUND", "The browser session does not exist.");
+            }
+            throw browserSessionFailure(exception);
+        } catch (RestClientException exception) {
+            throw unavailable(exception);
+        }
+    }
+
+    public SiteCloneBrowserSessionResponse browserAction(
+            UUID ownerId,
+            UUID siteCloneId,
+            Map<String, Object> action
+    ) {
+        return browserSessionPost(siteCloneId, "/actions", Map.of("ownerId", ownerId, "action", action));
+    }
+
+    public SiteCloneBrowserSessionResponse readyBrowserSession(UUID ownerId, UUID siteCloneId) {
+        return browserSessionPost(siteCloneId, "/ready", Map.of("ownerId", ownerId));
+    }
+
+    public void closeBrowserSession(UUID ownerId, UUID siteCloneId) {
+        try {
+            client.delete()
+                    .uri(uri -> uri.path("/internal/v1/browser-sessions/site-clones/{id}")
+                            .queryParam("ownerId", ownerId).build(siteCloneId))
+                    .header("X-WebLens-Service-Token", properties.serviceToken())
+                    .retrieve().toBodilessEntity();
+        } catch (RestClientResponseException exception) {
+            if (exception.getStatusCode().value() != HttpStatus.NOT_FOUND.value()) throw browserSessionFailure(exception);
+        } catch (RestClientException exception) {
+            throw unavailable(exception);
+        }
+    }
+
+    private SiteCloneBrowserSessionResponse browserSessionPost(
+            UUID siteCloneId,
+            String suffix,
+            Map<String, Object> body
+    ) {
+        try {
+            return client.post()
+                    .uri("/internal/v1/browser-sessions/site-clones/{id}" + suffix, siteCloneId)
+                    .header("X-WebLens-Service-Token", properties.serviceToken())
+                    .contentType(MediaType.APPLICATION_JSON)
+                    .body(body)
+                    .retrieve().body(SiteCloneBrowserSessionResponse.class);
+        } catch (RestClientResponseException exception) {
+            throw browserSessionFailure(exception);
+        } catch (RestClientException exception) {
+            throw unavailable(exception);
+        }
+    }
+
+    private static RuntimeException browserSessionFailure(RestClientResponseException exception) {
+        if (exception.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) {
+            return new NotFoundException("BROWSER_SESSION_NOT_FOUND", "The browser session does not exist.");
+        }
+        if (exception.getStatusCode().value() == HttpStatus.CONFLICT.value()) {
+            return new ConflictException(
+                    "BROWSER_SESSION_CONFLICT",
+                    "Another browser login session is active or this session is already ready."
+            );
+        }
+        return unavailable(exception);
     }
 
     private static String filename(HttpHeaders headers) {

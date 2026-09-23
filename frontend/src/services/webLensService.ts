@@ -7,6 +7,8 @@ import type {
   ScanPageRecord,
   ScanPagesReport,
   SiteClone,
+  SiteCloneBrowserAction,
+  SiteCloneBrowserSession,
   Website,
 } from '../domain/types'
 
@@ -81,4 +83,10 @@ export interface WebLensService {
   getSiteCloneProgress(siteCloneId: string, filters: { after: number; status: string; q: string }): Promise<import('../domain/types').SiteCloneProgress>
   cancelSiteClone(siteCloneId: string): Promise<SiteClone>
   getSiteCloneArtifact(siteCloneId: string, artifactId: string): Promise<Blob>
+  startSiteCloneBrowserSession(siteCloneId: string): Promise<SiteCloneBrowserSession>
+  getSiteCloneBrowserSession(siteCloneId: string): Promise<SiteCloneBrowserSession>
+  getSiteCloneBrowserScreenshot(siteCloneId: string): Promise<Blob>
+  sendSiteCloneBrowserAction(siteCloneId: string, action: SiteCloneBrowserAction): Promise<SiteCloneBrowserSession>
+  readySiteCloneBrowserSession(siteCloneId: string): Promise<SiteCloneBrowserSession>
+  closeSiteCloneBrowserSession(siteCloneId: string): Promise<void>
 }

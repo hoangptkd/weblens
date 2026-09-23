@@ -96,6 +96,10 @@ test('tạo ZIP bounded và manifest trung thực cho partial clone', async () =
     assert.equal(manifest.completenessCode, 'TRUNCATED_RESOURCE')
     assert.equal(manifest.files.length, 4)
     assert.doesNotMatch(build.manifest!.toString('utf8'), /private|secret/u)
+    assert.deepEqual(build.siteBundle?.resourceGaps?.map((gap) => gap.reason), [
+      'TRUNCATED_RESOURCE', 'BODY_UNAVAILABLE',
+    ])
+    assert.doesNotMatch(JSON.stringify(build.siteBundle?.resourceGaps), /private|secret/u)
   } finally {
     await cleanupStaticClone(build)
   }

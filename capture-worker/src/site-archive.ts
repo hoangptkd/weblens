@@ -45,6 +45,7 @@ interface RepresentativePage {
   sourceFinalUrl: string
   publicFinalUrl: string
   design: SitePageBundle['design']
+  resourceGaps: NonNullable<SitePageBundle['resourceGaps']>
 }
 
 export function sitePagePath(rootUrl: string, targetUrl: string, pageId: string): string {
@@ -72,6 +73,7 @@ export function decodeSiteBundle(encoded: Buffer, expectedPageId: string): SiteP
     mainPath?: string
     capturedAt?: string
     design?: SitePageBundle['design']
+    resourceGaps?: SitePageBundle['resourceGaps']
     files?: Array<Omit<SiteBundleFile, 'body'> & { bodyBase64?: string }>
   }
   if (value.schemaVersion !== 1 || value.pageId !== expectedPageId
@@ -97,6 +99,7 @@ export function decodeSiteBundle(encoded: Buffer, expectedPageId: string): SiteP
     }
   })
   const design = decodeDesignMetadata(value.design)
+  const resourceGaps = decodeResourceGaps(value.resourceGaps)
   return {
     schemaVersion: 1,
     pageId: value.pageId,
@@ -105,8 +108,22 @@ export function decodeSiteBundle(encoded: Buffer, expectedPageId: string): SiteP
     mainPath: safeArchivePath(value.mainPath),
     capturedAt: value.capturedAt,
     ...(design ? { design } : {}),
+    ...(resourceGaps ? { resourceGaps } : {}),
     files,
   }
+}
+
+function decodeResourceGaps(value: SitePageBundle['resourceGaps'] | undefined): SitePageBundle['resourceGaps'] | undefined {
+  if (value === undefined) return undefined
+  if (!Array.isArray(value) || value.length > 100) throw new Error('INVALID_SITE_PAGE_RESOURCE_GAPS')
+  return value.map((gap) => {
+    if (!gap || typeof gap.sourceUrl !== 'string' || gap.sourceUrl.length > 8192
+        || typeof gap.resourceType !== 'string' || gap.resourceType.length > 32
+        || typeof gap.reason !== 'string' || !/^[A-Z][A-Z0-9_]{0,63}$/u.test(gap.reason)) {
+      throw new Error('INVALID_SITE_PAGE_RESOURCE_GAPS')
+    }
+    return { sourceUrl: sanitizeUrl(gap.sourceUrl), resourceType: gap.resourceType, reason: gap.reason }
+  })
 }
 
 function decodeDesignMetadata(value: SitePageBundle['design'] | undefined): SitePageBundle['design'] | undefined {
@@ -185,6 +202,7 @@ export async function buildSiteArchives(
         sourceFinalUrl: bundle.sourceFinalUrl,
         publicFinalUrl: bundle.publicFinalUrl,
         design: bundle.design,
+        resourceGaps: bundle.resourceGaps ?? [],
       })
     }
     const representatives = selectRepresentatives(indexed)
@@ -273,6 +291,7 @@ export async function buildSiteArchives(
         status: layoutDuplicate ? 'REJECTED' : page.status,
         reason: layoutDuplicate ?? page.failureCode,
         ...(selected?.design ?? {}),
+        ...(selected?.resourceGaps.length ? { resourceGaps: selected.resourceGaps } : {}),
       }
     })
     const reasonCounts = countReasons(manifestPages.map((page) => page.reason))
@@ -280,6 +299,7 @@ export async function buildSiteArchives(
     const grouped = new Set(representatives.selected.map(({ reference, design }) => (
       `${design?.semanticRole ?? 'UNKNOWN'}\n${design?.routeTemplate ?? reference.localPath}`
     ))).size
+    const resourceGaps = representatives.selected.flatMap((page) => page.resourceGaps)
     const manifest = Buffer.from(JSON.stringify({
       schemaVersion: 2,
       kind: 'DESIGN_SITE_ARCHIVE',
@@ -313,7 +333,11 @@ export async function buildSiteArchives(
         ? 'PARTIAL_RENDER_FAILURE'
         : manifestPages.some((page) => page.reason === 'CANCELLED')
           ? 'PARTIAL_CANCELLED'
-          : 'REPRESENTATIVE_COMPLETE',
+          : resourceGaps.length > 0 ? 'PARTIAL_RESOURCE_GAPS' : 'REPRESENTATIVE_COMPLETE',
+      resourceGaps: {
+        count: resourceGaps.length,
+        reasonCounts: countReasons(resourceGaps.map((gap) => gap.reason)),
+      },
       layoutFingerprintVersion: LAYOUT_FINGERPRINT_VERSION,
       representatives: representatives.selected.map(({ reference, design, publicFinalUrl }) => ({
         semanticRole: design?.semanticRole ?? 'UNKNOWN',

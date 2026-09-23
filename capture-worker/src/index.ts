@@ -9,24 +9,30 @@ import { SiteCloneDatabase } from './site-database.js'
 import { SiteCloneWorker } from './site-worker.js'
 import { cleanupStaticClone, STATIC_CLONE_MAX_ARCHIVE_BYTES } from './static-clone.js'
 import { ObjectStorage } from './storage.js'
+import { InteractiveBrowserSessionManager } from './browser-session.js'
+import { readBrowserSettings } from './browser.js'
 
 const config = loadConfig()
+const browserSettings = readBrowserSettings()
 const database = new CaptureDatabase(config.databaseUrl)
 const analytics = new CaptureAnalytics(config)
 const storage = new ObjectStorage(config)
 const siteDatabase = new SiteCloneDatabase(database.pool)
+const browserSessions = new InteractiveBrowserSessionManager()
 
 await database.migrate()
 if (config.migrateClickHouseOnStart) await analytics.migrate()
 await storage.ensureBucket()
-const server = startServer(config, database, analytics, storage, siteDatabase)
-log('info', 'capture worker started', { port: config.port, concurrency: config.concurrency })
+const server = startServer(config, database, analytics, storage, siteDatabase, browserSessions)
+log('info', 'capture worker started', { port: config.port, concurrency: config.concurrency,
+  browserEngine: browserSettings.engine, browserHeadless: browserSettings.headless,
+  browserStealth: browserSettings.engine === 'playwright' && browserSettings.stealth })
 
 let running = true
 const loops: Promise<void>[] = []
 for (let index = 0; index < config.concurrency; index++) loops.push(jobLoop(randomUUID()))
 loops.push(analyticsLoop(randomUUID()), eventLoop(randomUUID()), reconstructionGcLoop())
-const siteWorker = new SiteCloneWorker(config, siteDatabase, storage)
+const siteWorker = new SiteCloneWorker(config, siteDatabase, storage, browserSessions)
 loops.push(...siteWorker.start())
 
 async function jobLoop(workerId: string): Promise<void> {
@@ -203,6 +209,7 @@ async function shutdown(signal: string): Promise<void> {
   siteWorker.stop()
   log('info', 'capture worker stopping', { signal })
   server.close()
+  await browserSessions.closeAll()
   await Promise.allSettled(loops)
   await Promise.allSettled([database.close(), analytics.close()])
 }

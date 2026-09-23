@@ -6,6 +6,7 @@ import type { CaptureDatabase, ScreenshotReference } from './database.js'
 import type { SiteArtifactReference, SiteCloneDatabase } from './site-database.js'
 import type { ObjectStorage } from './storage.js'
 import type { CaptureCommandEnvelope, SiteCloneCommandEnvelope } from './types.js'
+import type { InteractiveBrowserSessionManager } from './browser-session.js'
 
 const maxCommandBytes = 64 * 1024
 
@@ -22,6 +23,7 @@ export function startServer(
   analytics: CaptureServerAnalytics,
   storage: Pick<ObjectStorage, 'get'>,
   siteDatabase?: Pick<SiteCloneDatabase, 'acceptCommand' | 'getReport' | 'getArtifact' | 'getProgress'>,
+  browserSessions?: Pick<InteractiveBrowserSessionManager, 'start' | 'status' | 'screenshot' | 'act' | 'ready' | 'close'>,
 ) {
   return createServer(async (request, response) => {
     setHeaders(request, response)
@@ -47,6 +49,44 @@ export function startServer(
           duplicate,
           siteCloneRequestId: envelope.aggregateId,
         })
+      }
+      const browserSessionMatch = /^\/internal\/v1\/browser-sessions\/site-clones\/([0-9a-f-]+)(?:\/(screenshot|actions|ready))?$/u.exec(url.pathname)
+      if (browserSessionMatch?.[1]) {
+        if (!browserSessions) return problem(request, response, 503, 'BROWSER_SESSION_UNAVAILABLE')
+        const siteCloneId = browserSessionMatch[1]
+        const operation = browserSessionMatch[2] ?? ''
+        if (!uuid(siteCloneId)) return problem(request, response, 400, 'INVALID_ID')
+        if (request.method === 'POST' && operation === '') {
+          const input = parseBrowserSessionStart(await readBody(request))
+          return json(response, 201, await browserSessions.start(input.ownerId, siteCloneId, input.targetUrl))
+        }
+        if (request.method === 'GET' && operation === '') {
+          const ownerId = url.searchParams.get('ownerId') ?? ''
+          const status = uuid(ownerId) ? browserSessions.status(ownerId, siteCloneId) : null
+          return status ? json(response, 200, status) : problem(request, response, 404, 'BROWSER_SESSION_NOT_FOUND')
+        }
+        if (request.method === 'GET' && operation === 'screenshot') {
+          const ownerId = url.searchParams.get('ownerId') ?? ''
+          const screenshot = uuid(ownerId) ? await browserSessions.screenshot(ownerId, siteCloneId) : null
+          if (!screenshot) return problem(request, response, 404, 'BROWSER_SESSION_NOT_FOUND')
+          const sha256 = createHash('sha256').update(screenshot).digest('hex')
+          return binary(response, 200, screenshot, sha256, 'image/jpeg', 'inline; filename="browser-session.jpg"')
+        }
+        if (request.method === 'POST' && operation === 'actions') {
+          const input = parseOwnedBody(await readBody(request))
+          const status = await browserSessions.act(input.ownerId, siteCloneId, input.value['action'])
+          return status ? json(response, 200, status) : problem(request, response, 404, 'BROWSER_SESSION_NOT_FOUND')
+        }
+        if (request.method === 'POST' && operation === 'ready') {
+          const input = parseOwnedBody(await readBody(request))
+          const status = browserSessions.ready(input.ownerId, siteCloneId)
+          return status ? json(response, 200, status) : problem(request, response, 404, 'BROWSER_SESSION_NOT_FOUND')
+        }
+        if (request.method === 'DELETE' && operation === '') {
+          const ownerId = url.searchParams.get('ownerId') ?? ''
+          const closed = uuid(ownerId) && await browserSessions.close(ownerId, siteCloneId)
+          return closed ? json(response, 200, { closed: true }) : problem(request, response, 404, 'BROWSER_SESSION_NOT_FOUND')
+        }
       }
       const siteArtifactMatch = /^\/internal\/v1\/reports\/site-clones\/([0-9a-f-]+)\/artifacts\/([0-9a-f-]+)$/u.exec(url.pathname)
       if (request.method === 'GET' && siteArtifactMatch?.[1] && siteArtifactMatch[2]) {
@@ -149,6 +189,10 @@ export function startServer(
       const code = error instanceof Error ? error.message : 'INTERNAL_ERROR'
       if (code === 'MESSAGE_ID_COLLISION') return problem(request, response, 409, code)
       if (code.startsWith('INVALID_')) return problem(request, response, 400, code)
+      if (code === 'BROWSER_SESSION_NOT_FOUND') return problem(request, response, 404, code)
+      if (code === 'BROWSER_SESSION_CAPACITY_REACHED' || code === 'BROWSER_SESSION_ALREADY_READY') {
+        return problem(request, response, 409, code)
+      }
       if (code === 'ARTIFACT_EXPIRED' || code === 'ARTIFACT_OBJECT_MISSING') {
         return problem(request, response, 410, 'CAPTURE_ARTIFACT_GONE')
       }
@@ -158,6 +202,27 @@ export function startServer(
       return problem(request, response, 503, 'SERVICE_UNAVAILABLE')
     }
   }).listen(config.port, config.host)
+}
+
+function parseBrowserSessionStart(value: unknown): { ownerId: string; targetUrl: string } {
+  const input = parseOwnedBody(value)
+  const targetUrl = input.value['targetUrl']
+  if (typeof targetUrl !== 'string' || targetUrl.length < 1 || targetUrl.length > 8_192) {
+    throw new Error('INVALID_BROWSER_SESSION')
+  }
+  return { ownerId: input.ownerId, targetUrl }
+}
+
+function parseOwnedBody(value: unknown): { ownerId: string; value: Record<string, unknown> } {
+  if (!value || typeof value !== 'object') throw new Error('INVALID_BROWSER_SESSION')
+  const input = value as Record<string, unknown>
+  const ownerId = input['ownerId']
+  if (typeof ownerId !== 'string' || !uuid(ownerId)) throw new Error('INVALID_BROWSER_SESSION')
+  return { ownerId, value: input }
+}
+
+function uuid(value: string): boolean {
+  return /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu.test(value)
 }
 
 function snapshotResponse(

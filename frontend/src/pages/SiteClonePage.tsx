@@ -5,6 +5,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { webLensService } from '../api/webLensApiService'
 import { NumberPagination } from '../components/Pagination'
 import { SiteCloneProgress } from '../components/SiteCloneProgress'
+import { ManagedBrowserPanel } from '../components/ManagedBrowserPanel'
 import { EmptyState, ErrorState, LoadingState } from '../components/StateView'
 import type { SiteClone } from '../domain/types'
 import { useAsyncData } from '../hooks/useAsyncData'
@@ -18,6 +19,8 @@ export function SiteClonePage() {
   const [url, setUrl] = useState('')
   const [error, setError] = useState<string | null>(null)
   const [submitting, setSubmitting] = useState(false)
+  const [requiresLogin, setRequiresLogin] = useState(false)
+  const [browserSessionCloneId, setBrowserSessionCloneId] = useState<string | null>(null)
   const [downloading, setDownloading] = useState<string | null>(null)
   const [historyPage, setHistoryPage] = useState(0)
   const [historyPageSize, setHistoryPageSize] = useState(20)
@@ -59,6 +62,14 @@ export function SiteClonePage() {
     setSubmitting(true)
     try {
       const clone = await webLensService.startSiteClone(url, crypto.randomUUID())
+      if (requiresLogin) {
+        try {
+          await webLensService.startSiteCloneBrowserSession(clone.id)
+          setBrowserSessionCloneId(clone.id)
+        } catch (browserError) {
+          setError(browserError instanceof Error ? browserError.message : 'Clone đã được tạo nhưng chưa mở được trình duyệt đăng nhập.')
+        }
+      }
       setHistoryPage(0)
       setHistoryReloadKey((value) => value + 1)
       navigate(`/app/clone/${clone.id}`)
@@ -119,6 +130,7 @@ export function SiteClonePage() {
           <label htmlFor="site-clone-url">URL gốc</label>
           <div className="clone-url-field"><Globe2 aria-hidden="true" /><input id="site-clone-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://example.com" aria-invalid={Boolean(error)} aria-describedby={error ? 'site-clone-error' : 'site-clone-help'} /><button className="button button--primary" type="submit" disabled={submitting}>{submitting ? <LoaderCircle className="spin" aria-hidden="true" /> : <Play aria-hidden="true" />}Scan và clone</button></div>
           <small id="site-clone-help">Không cần chọn scan. Mỗi yêu cầu mới tự tạo một scan fresh.</small>
+          <label className="clone-login-option"><input type="checkbox" checked={requiresLogin} onChange={(event) => setRequiresLogin(event.target.checked)} />Website yêu cầu đăng nhập, cookie hoặc OTP</label>
         </form>
       </section>
 
@@ -135,6 +147,7 @@ export function SiteClonePage() {
           <article><small>RENDER LỖI</small><strong>{siteClone.failedCount.toLocaleString('vi-VN')}</strong><span>không bao gồm URL chủ động loại</span></article>
         </div>
         <SiteCloneProgress key={siteClone.id} clone={siteClone} />
+        {!terminal.has(siteClone.status) ? <ManagedBrowserPanel siteCloneId={siteClone.id} autoStart={browserSessionCloneId === siteClone.id} /> : null}
         {siteClone.terminalCode ? <div className="clone-terminal"><strong>{siteClone.terminalCode}</strong><span>{siteClone.terminalMessage ?? 'Workflow đã kết thúc với thông tin bổ sung.'}</span></div> : null}
         {siteClone.artifacts.length > 0 ? <div className="clone-artifacts"><div><ShieldCheck aria-hidden="true" /><span><strong>Artifact đã kiểm tra SHA-256</strong><small>Giải nén tất cả shard ZIP vào cùng một thư mục. Manifest mô tả trang thiếu và lỗi.</small></span></div><ul>{siteClone.artifacts.map((artifact) => <li key={artifact.id}><span className="clone-artifact-icon">{artifact.kind === 'MANIFEST' ? <FileJson2 /> : <Archive />}</span><span><strong>{artifact.filename}</strong><small>{formatBytes(artifact.byteSize)} · hết hạn {artifact.expiresAt}</small></span><button className="button button--secondary button--small" type="button" disabled={downloading === artifact.id} onClick={() => download(artifact.id, artifact.filename)}>{downloading === artifact.id ? <LoaderCircle className="spin" /> : <Download />}Tải</button></li>)}</ul></div> : null}
       </section> : detailState.loading && siteCloneId ? <section className="clone-empty" aria-busy="true"><LoaderCircle className="spin" aria-hidden="true" /><h2>Đang mở clone</h2><p>Đang nạp tiến độ, kết quả render và artifact mới nhất.</p></section> : <section className="clone-empty"><Archive aria-hidden="true" /><h2>Chọn một clone để kiểm tra</h2><p>Danh sách bên dưới giữ lại các workflow bền vững sau khi tải lại trang hoặc mở phiên làm việc mới.</p></section>}

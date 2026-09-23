@@ -7,6 +7,7 @@ import type { Config } from './config.js'
 import type { CaptureDatabase } from './database.js'
 import type { SiteCloneDatabase } from './site-database.js'
 import { startServer } from './server.js'
+import type { InteractiveBrowserSessionManager } from './browser-session.js'
 
 const token = 'capture-worker-test-token-at-least-32-bytes'
 const ownerId = '11111111-1111-1111-1111-111111111111'
@@ -110,12 +111,48 @@ test('chỉ trả artifact qua service token, owner scope và kiểm tra integri
         counts: { QUEUED: 0, RENDERING: 0, SUCCEEDED: 1, FAILED: 1, CANCELLED: 0 }, activePages: [], items: [], nextAfter: null }
     },
   }
-  const server = startServer(config(), database, analytics, storage, siteDatabase)
+  const browserStatus = {
+    status: 'AWAITING_USER' as const, currentUrl: 'https://example.com/login',
+    expiresAt: new Date(Date.now() + 60_000).toISOString(), viewportWidth: 1365, viewportHeight: 768,
+  }
+  let receivedAction: unknown = null
+  const browserSessions: Pick<InteractiveBrowserSessionManager, 'start' | 'status' | 'screenshot' | 'act' | 'ready' | 'close'> = {
+    start: async (owner, clone) => {
+      assert.equal(owner, ownerId); assert.equal(clone, captureId); return browserStatus
+    },
+    status: (owner, clone) => owner === ownerId && clone === captureId ? browserStatus : null,
+    screenshot: async (owner, clone) => owner === ownerId && clone === captureId ? screenshot : null,
+    act: async (owner, clone, action) => {
+      if (owner !== ownerId || clone !== captureId) return null
+      receivedAction = action
+      return browserStatus
+    },
+    ready: (owner, clone) => owner === ownerId && clone === captureId ? { ...browserStatus, status: 'READY' } : null,
+    close: async (owner, clone) => owner === ownerId && clone === captureId,
+  }
+  const server = startServer(config(), database, analytics, storage, siteDatabase, browserSessions)
   await once(server, 'listening')
   const port = (server.address() as AddressInfo).port
   const path = `/internal/v1/reports/captures/${captureId}/artifacts/screenshot?ownerId=${ownerId}`
 
   try {
+    const sessionPath = `/internal/v1/browser-sessions/site-clones/${captureId}`
+    const startedSession = await fetch(`http://127.0.0.1:${port}${sessionPath}`, {
+      method: 'POST', headers: { 'X-WebLens-Service-Token': token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ownerId, targetUrl: 'https://example.com/' }),
+    })
+    assert.equal(startedSession.status, 201)
+    assert.equal((await fetch(`http://127.0.0.1:${port}${sessionPath}?ownerId=${resourceId}`,
+      { headers: { 'X-WebLens-Service-Token': token } })).status, 404)
+    const secret = 'otp-that-must-not-be-returned'
+    const actionResponse = await fetch(`http://127.0.0.1:${port}${sessionPath}/actions`, {
+      method: 'POST', headers: { 'X-WebLens-Service-Token': token, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ownerId, action: { type: 'type', text: secret } }),
+    })
+    assert.equal(actionResponse.status, 200)
+    assert.deepEqual(receivedAction, { type: 'type', text: secret })
+    assert.equal((await actionResponse.text()).includes(secret), false)
+
     const progressPath = `/internal/v1/reports/site-clones/${captureId}/progress?ownerId=${ownerId}&after=12&limit=20&status=FAILED&q=%2Fabout`
     assert.equal((await fetch(`http://127.0.0.1:${port}${progressPath}`)).status, 401)
     const progressResponse = await fetch(`http://127.0.0.1:${port}${progressPath}`, { headers: { 'X-WebLens-Service-Token': token } })

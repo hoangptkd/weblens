@@ -81,6 +81,7 @@ export interface ClaimedSitePage {
   correlationId: string
   rootUrl: string
   pageId: string
+  publicUrl: string
   localPath: string
   leaseOwner: string
   leaseGeneration: number
@@ -290,7 +291,7 @@ export class SiteCloneDatabase {
       }
       const result = await client.query<{
         site_reconstruction_job_id: string; owner_id: string; scan_id: string; correlation_id: string; root_url: string
-        page_id: string; local_path: string; lease_owner: string; lease_generation: string
+        page_id: string; public_url: string; local_path: string; lease_owner: string; lease_generation: string
         attempt_count: number; max_retries_per_page: number
       }>(`with candidate as (
           select page.site_reconstruction_job_id,page.page_id
@@ -305,19 +306,19 @@ export class SiteCloneDatabase {
         ) update site_reconstruction_pages page
         set status='RENDERING',lease_owner=$1,lease_generation=lease_generation+1,
             lease_expires_at=now()+interval '60 seconds',attempt_count=attempt_count+1,
-            started_at=coalesce(page.started_at,now()),finished_at=null,updated_at=now()
+            started_at=coalesce(page.started_at,now()),finished_at=null,failure_code=null,updated_at=now()
         from candidate,site_reconstruction_jobs job
         where page.site_reconstruction_job_id=candidate.site_reconstruction_job_id
           and page.page_id=candidate.page_id and job.id=page.site_reconstruction_job_id
         returning page.site_reconstruction_job_id,job.owner_id,job.scan_id,job.correlation_id,job.root_url,
-          page.page_id,page.local_path,page.lease_owner,page.lease_generation,
+          page.page_id,page.public_url,page.local_path,page.lease_owner,page.lease_generation,
           page.attempt_count,job.max_retries_per_page`, [workerId])
       await client.query('commit')
       const row = result.rows[0]
       return row ? {
         jobId: row.site_reconstruction_job_id, ownerId: row.owner_id, scanId: row.scan_id,
         correlationId: row.correlation_id, rootUrl: row.root_url,
-        pageId: row.page_id, localPath: row.local_path,
+        pageId: row.page_id, publicUrl: row.public_url, localPath: row.local_path,
         leaseOwner: row.lease_owner, leaseGeneration: Number(row.lease_generation),
         attemptCount: row.attempt_count, maxRetries: row.max_retries_per_page,
       } : null
@@ -630,8 +631,9 @@ export class SiteCloneDatabase {
     }
   }
 
-  async reconcileCancellations(): Promise<void> {
+  async reconcileCancellations(): Promise<Array<{ id: string; ownerId: string }>> {
     const client = await this.pool.connect()
+    const reconciled: Array<{ id: string; ownerId: string }> = []
     try {
       await client.query('begin')
       await client.query(`update site_reconstruction_jobs
@@ -646,7 +648,7 @@ export class SiteCloneDatabase {
         from site_reconstruction_jobs job
         where page.site_reconstruction_job_id=job.id and job.status='CANCEL_REQUESTED'
           and page.status='QUEUED'`)
-      const jobs = await client.query<{ id: string }>(`select job.id
+      const jobs = await client.query<{ id: string; owner_id: string }>(`select job.id,job.owner_id
         from site_reconstruction_jobs job
         where job.status='CANCEL_REQUESTED'
           and not exists (select 1 from site_reconstruction_pages page
@@ -669,8 +671,10 @@ export class SiteCloneDatabase {
           where id=$1 returning status`, [row.id])
         const status = updated.rows[0]?.status
         if (status === 'CANCELLED' || status === 'FAILED') await this.enqueueEvent(client, row.id, status)
+        if (status) reconciled.push({ id: row.id, ownerId: row.owner_id })
       }
       await client.query('commit')
+      return reconciled
     } catch (error) {
       await client.query('rollback')
       throw error

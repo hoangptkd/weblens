@@ -36,6 +36,13 @@ switch ($Service) {
     }
     'capture' {
         $env:PLAYWRIGHT_BROWSERS_PATH = '0'
+        $env:CAMOUFOX_INSTALL_DIR = Join-Path $current 'capture-worker\camoufox'
+        if (-not $env:CAPTURE_BROWSER_ENGINE -or $env:CAPTURE_BROWSER_ENGINE -eq 'camoufox') {
+            if (-not (Test-Path -LiteralPath (Join-Path $env:CAMOUFOX_INSTALL_DIR 'camoufox.exe') -PathType Leaf) -or
+                -not (Test-Path -LiteralPath (Join-Path $env:CAMOUFOX_INSTALL_DIR 'version.json') -PathType Leaf)) {
+                throw 'Pinned Camoufox browser is missing from this release'
+            }
+        }
         Set-Location (Join-Path $current 'capture-worker')
         & (Join-Path $root 'runtime\node22\node.exe') 'dist\index.js'
     }

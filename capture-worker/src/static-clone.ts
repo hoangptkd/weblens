@@ -154,6 +154,13 @@ export async function buildStaticClone(
 
   const skippedCount = files.filter((file) => file.status === 'SKIPPED').length
   const truncated = files.some((file) => file.truncated)
+  const resourceGaps = files.filter((file) => file.kind === 'RESOURCE' && (file.status === 'SKIPPED' || file.truncated))
+    .slice(0, STATIC_CLONE_MAX_FILES)
+    .map((file) => ({
+      sourceUrl: file.sourceUrl,
+      resourceType: file.resourceType,
+      reason: file.reason ?? 'TRUNCATED_RESOURCE',
+    }))
   const completenessCode = skippedCount > 0 || truncated
     ? (budgetSkipped ? 'BUDGET_LIMITED' : truncated ? 'TRUNCATED_RESOURCE' : 'RESOURCE_GAPS')
     : 'COMPLETE'
@@ -206,6 +213,7 @@ export async function buildStaticClone(
         publicFinalUrl: redactUrl(plan.finalUrl),
         mainPath: plan.mainPath,
         capturedAt: new Date().toISOString(),
+        ...(resourceGaps.length > 0 ? { resourceGaps } : {}),
         files: [
           {
             kind: 'DOCUMENT', localPath: plan.mainPath, sourceUrl: plan.finalUrl,

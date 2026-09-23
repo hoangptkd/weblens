@@ -14,6 +14,8 @@ ClickHouse analytics, MinIO artifact và snapshot viewer có owner scope. Mỗi
 capture mới còn tạo best-effort một ZIP clone tĩnh một trang theo Pagesource
 adapter, kèm manifest và thời hạn tải 7 ngày. Frontend chỉ dùng Control Plane API;
 runtime không còn mock mode hoặc dữ liệu scan mô phỏng.
+Capture Worker dùng Camoufox mặc định theo ADR-015 trên local và VPS; Chromium
+còn như lựa chọn thủ công. Không bảo đảm vượt mọi CAPTCHA/Cloudflare.
 
 ## V1 goal
 
@@ -98,11 +100,14 @@ nhưng không publish được sẽ được dọn sau một giờ; archive đã
 7 ngày sẽ bị xóa khỏi MinIO và chuyển lifecycle sang `EXPIRED`/`DELETED`.
 
 Clone toàn website nhận duy nhất URL từ UI. Control Plane tự tạo website nếu cần,
-tạo một scan mới và chỉ dispatch Capture Worker khi Crawler đã terminal với ít
-nhất một page thành công. Baseline có thể cấu hình qua `WEBLENS_SITE_CLONE_*`:
+tạo một scan mới và dispatch Capture Worker khi Crawler đã terminal; nếu scan
+không có page cloneable, worker dùng URL gốc làm fallback. Với website cần đăng
+nhập, chọn tùy chọn tương ứng, thao tác qua screenshot rồi bấm tiếp tục; cookie
+chỉ tồn tại trong RAM tối đa 10 phút và mất khi worker restart. Baseline có thể
+cấu hình qua `WEBLENS_SITE_CLONE_*`:
 100.000 page, 200 GiB input, 50 GiB archive, shard 256 MiB, 4 page/job, retry 3,
 deadline 7 ngày và retention archive 7 ngày. `CAPTURE_SITE_CLONE_CONCURRENCY`
-giới hạn Chromium page worker toàn process; không đặt bằng crawler HTTP concurrency.
+giới hạn browser page worker toàn process; không đặt bằng crawler HTTP concurrency.
 
 Các lệnh kiểm tra Capture Worker:
 

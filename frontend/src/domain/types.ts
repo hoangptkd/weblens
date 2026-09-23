@@ -325,3 +325,17 @@ export interface SiteCloneProgress {
   items: SiteCloneProgressPage[]
   nextAfter: number | null
 }
+
+export interface SiteCloneBrowserSession {
+  status: 'AWAITING_USER' | 'READY'
+  currentUrl: string
+  expiresAt: string
+  viewportWidth: number
+  viewportHeight: number
+}
+
+export type SiteCloneBrowserAction =
+  | { type: 'click'; x: number; y: number }
+  | { type: 'type'; text: string }
+  | { type: 'key'; key: 'Enter' | 'Tab' | 'Escape' | 'Backspace' }
+  | { type: 'scroll'; deltaY: number }
