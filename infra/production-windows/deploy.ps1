@@ -61,10 +61,25 @@ try {
         try {
             Expand-Archive -LiteralPath $ReleaseZip -DestinationPath $unpacked
             $metadata = Get-Content -LiteralPath (Join-Path $unpacked 'release.json') -Raw | ConvertFrom-Json
-            if ($metadata.commit -ne $Commit -or
-                -not (Test-Path -LiteralPath (Join-Path $unpacked 'capture-worker\camoufox\camoufox.exe') -PathType Leaf) -or
-                -not (Test-Path -LiteralPath (Join-Path $unpacked 'frontend\release.json') -PathType Leaf)) {
+            if ($metadata.commit -ne $Commit -or -not (Test-Path -LiteralPath (Join-Path $unpacked 'frontend\release.json') -PathType Leaf)) {
                 throw 'Release archive content is incomplete'
+            }
+            $runtime = Get-Content -LiteralPath (Join-Path $unpacked 'capture-worker\runtime.json') -Raw | ConvertFrom-Json
+            if ($runtime.nodeModulesLockSha256 -notmatch '^[0-9a-f]{64}$' -or
+                $runtime.camoufoxExeSha256 -notmatch '^[0-9a-f]{64}$' -or
+                -not $previous -or -not (Test-Path -LiteralPath $previous -PathType Container)) {
+                throw 'Compatible browser runtime is unavailable'
+            }
+            $sourceModules = Join-Path $previous 'capture-worker\node_modules'
+            $sourceBrowser = Join-Path $previous 'capture-worker\camoufox'
+            if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $sourceModules '.package-lock.json')).Hash.ToLowerInvariant() -ne $runtime.nodeModulesLockSha256 -or
+                (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $sourceBrowser 'camoufox.exe')).Hash.ToLowerInvariant() -ne $runtime.camoufoxExeSha256) {
+                throw 'Browser runtime checksum does not match the release'
+            }
+            Copy-Item -LiteralPath $sourceModules -Destination (Join-Path $unpacked 'capture-worker\node_modules') -Recurse
+            Copy-Item -LiteralPath $sourceBrowser -Destination (Join-Path $unpacked 'capture-worker\camoufox') -Recurse
+            if (-not (Test-Path -LiteralPath (Join-Path $unpacked 'capture-worker\camoufox\camoufox.exe') -PathType Leaf)) {
+                throw 'Camoufox browser was not staged'
             }
             Move-Item -LiteralPath $unpacked -Destination $release
         } catch {

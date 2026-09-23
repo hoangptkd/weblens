@@ -26,6 +26,7 @@ try {
     $filename = "weblens-$commit-windows-amd64.zip"
     $asset = @($latest.assets | Where-Object name -eq $filename)
     if ($asset.Count -ne 1 -or $asset[0].digest -notmatch '^sha256:[0-9a-f]{64}$' -or
+        $asset[0].size -le 0 -or $asset[0].size -gt 2147483648 -or
         $asset[0].browser_download_url -ne "https://github.com/hoangptkd/weblens/releases/download/$($latest.tag_name)/$filename") {
         throw 'Deployment release asset is missing or invalid'
     }
@@ -38,7 +39,27 @@ try {
     }
     if (-not (Test-Path -LiteralPath $zip)) {
         $download = "$zip.download"
-        Invoke-WebRequest -UseBasicParsing -Uri $asset[0].browser_download_url -OutFile $download -TimeoutSec 1800
+        $part = "$zip.part"
+        $writer = [IO.File]::Open($download, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
+        try {
+            for ([long]$start = 0; $start -lt $asset[0].size; $start += 4MB) {
+                $end = [long][math]::Min($start + 4MB - 1, $asset[0].size - 1)
+                $complete = $false
+                for ($attempt = 1; $attempt -le 5; $attempt++) {
+                    $status = & curl.exe --fail --location --retry 2 --silent --show-error --max-time 30 --range "$start-$end" --max-filesize ($end - $start + 1) --output $part --write-out '%{http_code}' $asset[0].browser_download_url
+                    if ($LASTEXITCODE -eq 0 -and $status.Trim() -eq '206' -and
+                        (Get-Item -LiteralPath $part).Length -eq ($end - $start + 1)) {
+                        $complete = $true
+                        break
+                    }
+                    Start-Sleep -Seconds 2
+                }
+                if (-not $complete) { throw 'Deployment release range download failed' }
+                $reader = [IO.File]::OpenRead($part)
+                try { $reader.CopyTo($writer) } finally { $reader.Dispose() }
+                Remove-Item -LiteralPath $part -Force
+            }
+        } finally { $writer.Dispose() }
         if ((Get-FileHash -Algorithm SHA256 -LiteralPath $download).Hash.ToLowerInvariant() -ne $expectedHash) {
             Remove-Item -LiteralPath $download -Force
             throw 'Deployment release checksum failed'

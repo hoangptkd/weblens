@@ -50,6 +50,12 @@ try {
     $env:CAMOUFOX_INSTALL_DIR = $previousInstallDir
     $env:WEBLENS_BROWSER_SMOKE = $previousSmoke
 }
+$runtime = @{
+    nodeModulesLockSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $staging 'capture-worker\node_modules\.package-lock.json')).Hash.ToLowerInvariant()
+    camoufoxExeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $camoufoxDestination 'camoufox.exe')).Hash.ToLowerInvariant()
+}
+$runtime | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $staging 'capture-worker\runtime.json') -Encoding ascii
+Remove-Item -LiteralPath (Join-Path $staging 'capture-worker\node_modules'), $camoufoxDestination -Recurse -Force
 $loopbackApi = Get-ChildItem -LiteralPath (Join-Path $repository 'frontend\dist\assets') -Filter '*.js' |
     Select-String -SimpleMatch 'http://localhost:8080', 'http://127.0.0.1:8080' |
     Select-Object -First 1

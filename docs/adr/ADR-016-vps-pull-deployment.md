@@ -16,6 +16,10 @@ repository công khai tạo đường chạy mã PR từ fork trên VPS.
 - CI chạy test và build trên GitHub hosted runner như trước, sau đó xuất bản ZIP
   Windows có commit trong tên dưới dạng GitHub Release công khai. ZIP không chứa
   credential; release chứa thông báo giấy phép Camoufox và checksum từng file.
+  Browser binary và `node_modules` được kiểm tra trong CI, nhưng không tải lại ở
+  mỗi release. VPS chỉ tái sử dụng chúng từ release đang chạy khi SHA-256 của
+  Camoufox executable và npm lock nội bộ khớp manifest trong ZIP mới; nếu khác,
+  deployment từ chối và phải cung cấp runtime tương thích bằng quy trình riêng.
 - Windows Scheduled Task `WebLensDeployPoll` chạy mỗi 5 phút dưới SYSTEM. Nó chỉ
   đọc GitHub Releases của `hoangptkd/weblens` qua HTTPS, chọn tag `deploy-<SHA>`
   đã publish, kiểm tra tên/URL asset và SHA-256 do GitHub cung cấp, rồi gọi
