@@ -82,7 +82,11 @@ try {
     Get-ChildItem -LiteralPath $releases -Directory | Where-Object { $_.FullName -notin $keep } | ForEach-Object {
         $resolved = [IO.Path]::GetFullPath($_.FullName)
         if ($resolved.StartsWith(([IO.Path]::GetFullPath($releases) + [IO.Path]::DirectorySeparatorChar), [StringComparison]::OrdinalIgnoreCase)) {
-            Remove-Item -LiteralPath $resolved -Recurse -Force
+            try {
+                Remove-Item -LiteralPath $resolved -Recurse -Force -ErrorAction Stop
+            } catch {
+                Write-Warning "Old release cleanup is deferred: $resolved"
+            }
         }
     }
     Write-Output "WebLens release $Commit is healthy."
