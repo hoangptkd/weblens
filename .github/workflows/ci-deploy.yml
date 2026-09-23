@@ -196,14 +196,29 @@ jobs:
       - name: Upload and activate immutable release
         shell: pwsh
         run: |
-          $ssh = @('-p', $env:VPS_PORT, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=20', '-i', "$HOME\.ssh\id_ed25519")
+          $ssh = @('-p', $env:VPS_PORT, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=20', '-i', "$HOME\.ssh\id_ed25519")
           $remote = "$env:VPS_USER@$env:VPS_HOST"
-          & ssh @ssh $remote 'powershell.exe -NoProfile -Command "New-Item -ItemType Directory -Force C:\ProgramData\WebLens\incoming | Out-Null"'
-          if ($LASTEXITCODE -ne 0) { throw 'Could not prepare remote release directory' }
-          & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=20 -i "$HOME\.ssh\id_ed25519" "artifacts\weblens-${{ github.sha }}-windows-amd64.zip" "${remote}:C:/ProgramData/WebLens/incoming/"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not upload release' }
-          & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -i "$HOME\.ssh\id_ed25519" 'infra\production-windows\deploy.ps1' "${remote}:C:/ProgramData/WebLens/incoming/deploy-${{ github.sha }}.ps1"
-          if ($LASTEXITCODE -ne 0) { throw 'Could not upload deployment script' }
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & ssh @ssh $remote 'powershell.exe -NoProfile -Command "New-Item -ItemType Directory -Force C:\ProgramData\WebLens\incoming | Out-Null"'
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw 'Could not prepare remote release directory' }
+            Start-Sleep -Seconds 5
+          }
+          Write-Output 'Remote release directory is ready.'
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=20 -i "$HOME\.ssh\id_ed25519" "artifacts\weblens-${{ github.sha }}-windows-amd64.zip" "${remote}:C:/ProgramData/WebLens/incoming/"
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw 'Could not upload release' }
+            Start-Sleep -Seconds 5
+          }
+          Write-Output 'Release archive uploaded.'
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=15 -i "$HOME\.ssh\id_ed25519" 'infra\production-windows\deploy.ps1' "${remote}:C:/ProgramData/WebLens/incoming/deploy-${{ github.sha }}.ps1"
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw 'Could not upload deployment script' }
+            Start-Sleep -Seconds 5
+          }
+          Write-Output 'Deployment script uploaded.'
           $release = "artifacts\weblens-${{ github.sha }}-windows-amd64.zip"
           $releaseSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $release).Hash
           & ssh @ssh $remote "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\WebLens\incoming\deploy-${{ github.sha }}.ps1 -ReleaseZip C:\ProgramData\WebLens\incoming\weblens-${{ github.sha }}-windows-amd64.zip -Commit ${{ github.sha }} -ReleaseSha256 $releaseSha256"
