@@ -57,6 +57,8 @@ if ($loopbackApi) { throw 'Frontend production bundle contains a loopback API UR
 Copy-Item -Path (Join-Path $repository 'frontend\dist\*') -Destination (Join-Path $staging 'frontend') -Recurse
 Copy-Item -Path (Join-Path $repository 'infra\production-windows\*') -Destination (Join-Path $staging 'infra\production-windows') -Recurse
 
+@{ commit = $Commit } | ConvertTo-Json -Compress |
+    Set-Content -LiteralPath (Join-Path $staging 'frontend\release.json') -Encoding ascii
 @{ commit = $Commit; createdAt = [DateTime]::UtcNow.ToString('O'); platform = 'windows-amd64' } | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $staging 'release.json') -Encoding UTF8
 Push-Location $staging
 try {

@@ -52,8 +52,25 @@ try {
     $previous = $null
     if (Test-Path -LiteralPath $current) { $previous = (Get-Item -LiteralPath $current).Target }
     if (-not (Test-Path -LiteralPath $release)) {
-        New-Item -ItemType Directory -Force -Path $release | Out-Null
-        Expand-Archive -LiteralPath $ReleaseZip -DestinationPath $release
+        $unpacked = Join-Path $releases "$Commit-$([guid]::NewGuid().ToString('N')).extracting"
+        $resolvedReleases = [IO.Path]::GetFullPath($releases) + [IO.Path]::DirectorySeparatorChar
+        if (-not ([IO.Path]::GetFullPath($unpacked)).StartsWith($resolvedReleases, [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'Release staging path is outside the releases directory'
+        }
+        New-Item -ItemType Directory -Path $unpacked | Out-Null
+        try {
+            Expand-Archive -LiteralPath $ReleaseZip -DestinationPath $unpacked
+            $metadata = Get-Content -LiteralPath (Join-Path $unpacked 'release.json') -Raw | ConvertFrom-Json
+            if ($metadata.commit -ne $Commit -or
+                -not (Test-Path -LiteralPath (Join-Path $unpacked 'capture-worker\camoufox\camoufox.exe') -PathType Leaf) -or
+                -not (Test-Path -LiteralPath (Join-Path $unpacked 'frontend\release.json') -PathType Leaf)) {
+                throw 'Release archive content is incomplete'
+            }
+            Move-Item -LiteralPath $unpacked -Destination $release
+        } catch {
+            Remove-Item -LiteralPath $unpacked -Recurse -Force -ErrorAction SilentlyContinue
+            throw
+        }
     }
     $stopOrder = @($serviceNames)
     [array]::Reverse($stopOrder)

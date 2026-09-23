@@ -112,6 +112,8 @@ jobs:
     needs: [backend, crawler, capture-worker, frontend]
     runs-on: windows-latest
     timeout-minutes: 45
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
       - uses: actions/setup-java@b6effb05e454b25005698d916606bdc6ffcbf961 # v5
@@ -160,66 +162,45 @@ jobs:
           path: artifacts/weblens-${{ github.sha }}-windows-amd64.zip
           if-no-files-found: error
           retention-days: 7
+      - name: Publish deployment release for VPS pull
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = 'deploy-${{ github.sha }}'
+          $asset = 'artifacts/weblens-${{ github.sha }}-windows-amd64.zip'
+          & gh release create $tag $asset --repo $env:GITHUB_REPOSITORY --target '${{ github.sha }}' --title "WebLens ${{ github.sha }}" --notes 'Windows-native deployment artifact; no runtime secrets.'
+          if ($LASTEXITCODE -ne 0) { throw 'Could not publish deployment release' }
 
   deploy:
     if: github.ref == 'refs/heads/main' && github.event_name != 'pull_request'
     needs: release
-    runs-on: windows-latest
-    timeout-minutes: 30
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
     environment:
       name: production
       url: ${{ vars.WEBLENS_PUBLIC_URL }}
     concurrency:
       group: production
-      cancel-in-progress: false
-    env:
-      VPS_HOST: ${{ secrets.VPS_HOST }}
-      VPS_PORT: ${{ secrets.VPS_PORT }}
-      VPS_USER: ${{ secrets.VPS_USER }}
-      VPS_SSH_PRIVATE_KEY: ${{ secrets.VPS_SSH_PRIVATE_KEY }}
-      VPS_HOST_KEY: ${{ secrets.VPS_HOST_KEY }}
+      cancel-in-progress: true
     steps:
-      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
-        with:
-          name: weblens-${{ github.sha }}-windows-amd64
-          path: artifacts
-      - name: Configure SSH
+      - name: Verify VPS activated release
         shell: pwsh
         run: |
-          if (-not $env:VPS_HOST -or -not $env:VPS_USER -or -not $env:VPS_SSH_PRIVATE_KEY -or -not $env:VPS_HOST_KEY) { throw 'Missing VPS SSH secret' }
-          if (-not $env:VPS_PORT) { 'VPS_PORT=22' | Out-File $env:GITHUB_ENV -Append -Encoding utf8 }
-          New-Item -ItemType Directory -Force "$HOME\.ssh" | Out-Null
-          $env:VPS_SSH_PRIVATE_KEY | Set-Content -NoNewline "$HOME\.ssh\id_ed25519"
-          $env:VPS_HOST_KEY | Set-Content "$HOME\.ssh\known_hosts"
-          icacls "$HOME\.ssh\id_ed25519" /inheritance:r /grant:r "${env:USERNAME}:R" | Out-Null
-      - name: Upload and activate immutable release
-        shell: pwsh
-        run: |
-          $ssh = @('-p', $env:VPS_PORT, '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes', '-o', 'ConnectTimeout=15', '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=20', '-i', "$HOME\.ssh\id_ed25519")
-          $remote = "$env:VPS_USER@$env:VPS_HOST"
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-            & ssh @ssh $remote 'powershell.exe -NoProfile -Command "New-Item -ItemType Directory -Force C:\ProgramData\WebLens\incoming | Out-Null"'
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($attempt -eq 3) { throw 'Could not prepare remote release directory' }
-            Start-Sleep -Seconds 5
+          $expected = '${{ github.sha }}'
+          for ($attempt = 1; $attempt -le 180; $attempt++) {
+            try {
+              $version = Invoke-RestMethod -Uri "https://jobnext.top/release.json?check=$expected" -TimeoutSec 10
+              if ($version.commit -eq $expected) {
+                try {
+                  Invoke-WebRequest -Uri 'https://jobnext.top/api/v1/auth/me' -TimeoutSec 10 -ErrorAction Stop | Out-Null
+                  $apiStatus = 200
+                } catch {
+                  $apiStatus = [int]$_.Exception.Response.StatusCode
+                }
+                if ($apiStatus -eq 401) { Write-Output "WebLens $expected is serving traffic."; exit 0 }
+              }
+            } catch {}
+            Start-Sleep -Seconds 10
           }
-          Write-Output 'Remote release directory is ready.'
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-            & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=15 -o ServerAliveInterval=15 -o ServerAliveCountMax=20 -i "$HOME\.ssh\id_ed25519" "artifacts\weblens-${{ github.sha }}-windows-amd64.zip" "${remote}:C:/ProgramData/WebLens/incoming/"
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($attempt -eq 3) { throw 'Could not upload release' }
-            Start-Sleep -Seconds 5
-          }
-          Write-Output 'Release archive uploaded.'
-          for ($attempt = 1; $attempt -le 3; $attempt++) {
-            & scp -P $env:VPS_PORT -o BatchMode=yes -o IdentitiesOnly=yes -o ConnectTimeout=15 -i "$HOME\.ssh\id_ed25519" 'infra\production-windows\deploy.ps1' "${remote}:C:/ProgramData/WebLens/incoming/deploy-${{ github.sha }}.ps1"
-            if ($LASTEXITCODE -eq 0) { break }
-            if ($attempt -eq 3) { throw 'Could not upload deployment script' }
-            Start-Sleep -Seconds 5
-          }
-          Write-Output 'Deployment script uploaded.'
-          $release = "artifacts\weblens-${{ github.sha }}-windows-amd64.zip"
-          $releaseSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath $release).Hash
-          & ssh @ssh $remote "powershell.exe -NoProfile -ExecutionPolicy Bypass -File C:\ProgramData\WebLens\incoming\deploy-${{ github.sha }}.ps1 -ReleaseZip C:\ProgramData\WebLens\incoming\weblens-${{ github.sha }}-windows-amd64.zip -Commit ${{ github.sha }} -ReleaseSha256 $releaseSha256"
-          if ($LASTEXITCODE -ne 0) { throw 'Remote deployment failed' }
+          throw "VPS did not activate WebLens $expected within 30 minutes"

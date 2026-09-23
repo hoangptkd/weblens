@@ -26,6 +26,8 @@ sử dụng CrawlObserver được phê duyệt trong
 [ADR-005](adr/ADR-005-tach-crawler-thanh-microservice.md). ClickHouse analytical
 store được phê duyệt trong
 [ADR-006](adr/ADR-006-tich-hop-clickhouse-cho-analytics.md).
+VPS nhận Windows release qua HTTPS và Scheduled Task theo
+[ADR-016](adr/ADR-016-vps-pull-deployment.md).
 
 ## Sơ đồ hệ thống
 

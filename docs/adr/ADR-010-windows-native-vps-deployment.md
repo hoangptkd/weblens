@@ -4,6 +4,9 @@ Status: Accepted
 Date: 2026-09-22
 Supersedes: the production runtime and self-hosted PostgreSQL decisions in ADR-004 and ADR-008
 
+The GitHub Actions-to-VPS SSH transfer was superseded by the VPS pull workflow in
+ADR-016 on 2026-09-24. The Windows-native runtime and rollback model remain.
+
 ## Context
 
 The selected Windows Server 2019 VPS cannot run WSL2 or nested virtualization,

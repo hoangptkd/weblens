@@ -55,4 +55,7 @@ foreach ($serviceName in $serviceNames) {
 }
 & icacls.exe (Join-Path $programData 'caddy') '/grant' 'NT SERVICE\WebLensCaddy:(OI)(CI)M'
 
+& schtasks.exe /Create /TN WebLensDeployPoll /SC MINUTE /MO 5 /RU SYSTEM /RL HIGHEST /TR 'powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\WebLens\current\infra\production-windows\poll-release.ps1' /F
+if ($LASTEXITCODE -ne 0) { throw 'Could not register deployment polling task' }
+
 Write-Output 'WebLens Windows runtime and services are installed.'
