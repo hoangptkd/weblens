@@ -13,7 +13,10 @@ if (-not $mutex.WaitOne(0)) { return }
 try {
     $headers = @{ 'User-Agent' = 'WebLens-Deploy-Poll'; 'Accept' = 'application/vnd.github+json' }
     $published = Invoke-RestMethod -Uri 'https://api.github.com/repos/hoangptkd/weblens/releases?per_page=5' -Headers $headers -TimeoutSec 20
-    $latest = $published | Where-Object { $_.tag_name -match '^deploy-[0-9a-f]{40}$' -and -not $_.draft -and -not $_.prerelease } | Select-Object -First 1
+    $latest = $published |
+        Where-Object { $_.tag_name -match '^deploy-[0-9a-f]{40}$' -and -not $_.draft -and -not $_.prerelease } |
+        Sort-Object -Property published_at -Descending |
+        Select-Object -First 1
     if (-not $latest) { return }
 
     $commit = $latest.tag_name.Substring(7)
