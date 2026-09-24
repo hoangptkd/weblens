@@ -12,7 +12,7 @@ $mutex = [Threading.Mutex]::new($false, 'Global\WebLensReleasePoll')
 if (-not $mutex.WaitOne(0)) { return }
 try {
     $headers = @{ 'User-Agent' = 'WebLens-Deploy-Poll'; 'Accept' = 'application/vnd.github+json' }
-    $published = @(Invoke-RestMethod -Uri 'https://api.github.com/repos/hoangptkd/weblens/releases?per_page=5' -Headers $headers -TimeoutSec 20)
+    $published = Invoke-RestMethod -Uri 'https://api.github.com/repos/hoangptkd/weblens/releases?per_page=5' -Headers $headers -TimeoutSec 20
     $latest = $published | Where-Object { $_.tag_name -match '^deploy-[0-9a-f]{40}$' -and -not $_.draft -and -not $_.prerelease } | Select-Object -First 1
     if (-not $latest) { return }
 
@@ -42,11 +42,11 @@ try {
         $part = "$zip.part"
         $writer = [IO.File]::Open($download, [IO.FileMode]::Create, [IO.FileAccess]::Write, [IO.FileShare]::None)
         try {
-            for ([long]$start = 0; $start -lt $asset[0].size; $start += 4MB) {
-                $end = [long][math]::Min($start + 4MB - 1, $asset[0].size - 1)
+            for ([long]$start = 0; $start -lt $asset[0].size; $start += 1MB) {
+                $end = [long][math]::Min($start + 1MB - 1, $asset[0].size - 1)
                 $complete = $false
                 for ($attempt = 1; $attempt -le 5; $attempt++) {
-                    $status = & curl.exe --fail --location --retry 2 --silent --show-error --max-time 30 --range "$start-$end" --max-filesize ($end - $start + 1) --output $part --write-out '%{http_code}' $asset[0].browser_download_url
+                    $status = & curl.exe --fail --location --retry 2 --silent --show-error --max-time 20 --range "$start-$end" --max-filesize ($end - $start + 1) --output $part --write-out '%{http_code}' $asset[0].browser_download_url
                     if ($LASTEXITCODE -eq 0 -and $status.Trim() -eq '206' -and
                         (Get-Item -LiteralPath $part).Length -eq ($end - $start + 1)) {
                         $complete = $true

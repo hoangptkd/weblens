@@ -76,8 +76,10 @@ try {
                 (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $sourceBrowser 'camoufox.exe')).Hash.ToLowerInvariant() -ne $runtime.camoufoxExeSha256) {
                 throw 'Browser runtime checksum does not match the release'
             }
-            Copy-Item -LiteralPath $sourceModules -Destination (Join-Path $unpacked 'capture-worker\node_modules') -Recurse
-            Copy-Item -LiteralPath $sourceBrowser -Destination (Join-Path $unpacked 'capture-worker\camoufox') -Recurse
+            & robocopy.exe $sourceModules (Join-Path $unpacked 'capture-worker\node_modules') /E /R:2 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw 'Node runtime copy failed' }
+            & robocopy.exe $sourceBrowser (Join-Path $unpacked 'capture-worker\camoufox') /E /R:2 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+            if ($LASTEXITCODE -ge 8) { throw 'Camoufox runtime copy failed' }
             if (-not (Test-Path -LiteralPath (Join-Path $unpacked 'capture-worker\camoufox\camoufox.exe') -PathType Leaf)) {
                 throw 'Camoufox browser was not staged'
             }
