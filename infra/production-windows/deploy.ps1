@@ -45,6 +45,23 @@ function Wait-Health([string]$Url, [int]$Attempts = 30) {
     throw "Health check failed: $Url"
 }
 
+function Stop-BackendProcesses {
+    # WinSW stops the PowerShell wrapper, but its Java child can survive a deployment.
+    $javaPath = Join-Path $root 'runtime\jre21\bin\java.exe'
+    Get-CimInstance Win32_Process -Filter "Name='java.exe'" |
+        Where-Object {
+            $_.ExecutablePath -eq $javaPath -and
+            $_.CommandLine -match '(?i)(^|\s)-jar\s+weblens-backend\.jar(\s|$)'
+        } |
+        ForEach-Object {
+            Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop
+            Wait-Process -Id $_.ProcessId -Timeout 10 -ErrorAction SilentlyContinue
+        }
+    if (Get-NetTCPConnection -LocalPort 8080 -State Listen -ErrorAction SilentlyContinue) {
+        throw 'Port 8080 is still occupied after stopping WebLens Backend'
+    }
+}
+
 if (-not $mutex.WaitOne(0)) { throw 'Another WebLens deployment is running' }
 try {
     $actualReleaseHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $ReleaseZip).Hash
@@ -92,6 +109,7 @@ try {
     $stopOrder = @($serviceNames)
     [array]::Reverse($stopOrder)
     foreach ($name in $stopOrder) { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue }
+    Stop-BackendProcesses
     Set-CurrentRelease $release
 
     try {
@@ -104,6 +122,7 @@ try {
         Wait-Health 'https://127.0.0.1/'
     } catch {
         foreach ($name in $stopOrder) { Stop-Service -Name $name -Force -ErrorAction SilentlyContinue }
+        Stop-BackendProcesses
         if ($previous -and (Test-Path -LiteralPath $previous)) {
             Set-CurrentRelease $previous
             foreach ($name in $serviceNames) { Start-Service -Name $name -ErrorAction SilentlyContinue }
