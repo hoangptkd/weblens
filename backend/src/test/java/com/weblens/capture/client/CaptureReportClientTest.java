@@ -171,6 +171,7 @@ class CaptureReportClientTest {
                 TOKEN,
                 Duration.ofSeconds(1),
                 Duration.ofSeconds(5),
+                Duration.ofSeconds(45),
                 Duration.ofSeconds(30)
         );
     }

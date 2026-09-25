@@ -1,16 +1,20 @@
 package com.weblens.siteclone.client;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import com.sun.net.httpserver.HttpServer;
 import com.weblens.common.config.CaptureProperties;
 import com.weblens.common.config.SiteCloneProperties;
+import com.weblens.common.exception.ApiException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.HexFormat;
 import java.util.UUID;
 import org.junit.jupiter.api.Test;
+import org.springframework.http.HttpStatus;
 import org.springframework.web.client.RestClient;
 
 class SiteCloneReportClientTest {
@@ -50,13 +54,64 @@ class SiteCloneReportClientTest {
         }
     }
 
+    @Test
+    void allowsSlowBrowserStartupAndClassifiesBrowserFailure() throws Exception {
+        UUID ownerId = UUID.randomUUID();
+        UUID siteCloneId = UUID.randomUUID();
+        HttpServer server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        server.createContext("/internal/v1/browser-sessions/site-clones", exchange -> {
+            if ("POST".equals(exchange.getRequestMethod())) {
+                try {
+                    Thread.sleep(600);
+                } catch (InterruptedException exception) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+                byte[] response = """
+                        {"status":"AWAITING_USER","currentUrl":"https://example.com/",
+                         "expiresAt":"2026-09-25T04:00:00Z","viewportWidth":1365,"viewportHeight":768}
+                        """.getBytes(StandardCharsets.UTF_8);
+                exchange.getResponseHeaders().add("Content-Type", "application/json");
+                exchange.sendResponseHeaders(201, response.length);
+                try (OutputStream body = exchange.getResponseBody()) {
+                    body.write(response);
+                }
+            } else {
+                exchange.sendResponseHeaders(503, -1);
+            }
+        });
+        server.start();
+        try {
+            URI baseUrl = URI.create("http://127.0.0.1:%d".formatted(server.getAddress().getPort()));
+            CaptureProperties defaults = properties(baseUrl);
+            CaptureProperties timeouts = new CaptureProperties(
+                    defaults.commandUrl(), defaults.siteCloneCommandUrl(), baseUrl,
+                    defaults.serviceToken(), defaults.connectTimeout(), Duration.ofMillis(200),
+                    Duration.ofSeconds(3), defaults.outboxLease()
+            );
+            SiteCloneReportClient client = new SiteCloneReportClient(
+                    RestClient.builder(), timeouts, siteCloneProperties()
+            );
+
+            assertThat(client.startBrowserSession(ownerId, siteCloneId, "https://example.com/").status())
+                    .isEqualTo("AWAITING_USER");
+            assertThatThrownBy(() -> client.getBrowserSession(ownerId, siteCloneId))
+                    .isInstanceOfSatisfying(ApiException.class, exception -> {
+                        assertThat(exception.status()).isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
+                        assertThat(exception.code()).isEqualTo("BROWSER_SESSION_UNAVAILABLE");
+                    });
+        } finally {
+            server.stop(0);
+        }
+    }
+
     private static CaptureProperties properties(URI baseUrl) {
         return new CaptureProperties(
                 baseUrl.resolve("/internal/v1/commands/captures"),
                 baseUrl.resolve("/internal/v1/commands/site-clones"),
                 baseUrl,
                 "capture-report-test-token-at-least-32-bytes",
-                Duration.ofSeconds(1), Duration.ofSeconds(5), Duration.ofSeconds(30)
+                Duration.ofSeconds(1), Duration.ofSeconds(5), Duration.ofSeconds(45), Duration.ofSeconds(30)
         );
     }
 

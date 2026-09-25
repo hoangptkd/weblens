@@ -2,6 +2,7 @@ import { render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { ApiError } from '../api/apiClient'
 import { webLensService } from '../api/webLensApiService'
 import type { SiteClone } from '../domain/types'
 import { SiteClonePage } from './SiteClonePage'
@@ -43,6 +44,37 @@ describe('SiteClonePage', () => {
 
     expect(startBrowser).toHaveBeenCalledWith(clone.id)
     expect(await screen.findByRole('heading', { name: 'Trình duyệt đăng nhập tạm thời' })).toBeInTheDocument()
+  })
+
+  it('cho mở lại phiên khi trình duyệt chết sau thao tác', async () => {
+    const clone = siteClone()
+    const browserSession = {
+      status: 'AWAITING_USER' as const,
+      currentUrl: 'https://example.com/login',
+      expiresAt: '2026-09-25T04:10:00Z',
+      viewportWidth: 1365,
+      viewportHeight: 768,
+    }
+    vi.spyOn(webLensService, 'listSiteClones').mockResolvedValue(siteClonePage([]))
+    vi.spyOn(webLensService, 'getSiteClone').mockResolvedValue(clone)
+    const startBrowser = vi.spyOn(webLensService, 'startSiteCloneBrowserSession').mockResolvedValue(browserSession)
+    vi.spyOn(webLensService, 'getSiteCloneBrowserSession').mockResolvedValue(browserSession)
+    vi.spyOn(webLensService, 'getSiteCloneBrowserScreenshot').mockResolvedValue(new Blob(['jpeg']))
+    vi.spyOn(webLensService, 'sendSiteCloneBrowserAction').mockRejectedValue(new ApiError({
+      code: 'BROWSER_SESSION_UNAVAILABLE', status: 503,
+      detail: 'The login browser is unavailable. Open a new session to continue.',
+    }, 503))
+    const user = userEvent.setup()
+    renderSiteClonePage('/app/clone/clone-1')
+
+    await user.click(await screen.findByRole('button', { name: 'Mở phiên đăng nhập' }))
+    await screen.findByRole('heading', { name: 'Trình duyệt đăng nhập tạm thời' })
+    await user.click(screen.getByRole('button', { name: 'Enter' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Phiên trình duyệt đã đóng')
+    expect(screen.queryByRole('heading', { name: 'Trình duyệt đăng nhập tạm thời' })).not.toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Mở phiên đăng nhập' }))
+    expect(startBrowser).toHaveBeenCalledTimes(2)
   })
 
   it('chỉ yêu cầu URL và tự tạo workflow scan nội bộ', async () => {

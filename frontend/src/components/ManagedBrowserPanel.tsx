@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent, MouseEvent } from 'react'
+import { ApiError } from '../api/apiClient'
 import { webLensService } from '../api/webLensApiService'
 import type { SiteCloneBrowserAction, SiteCloneBrowserSession } from '../domain/types'
 
@@ -35,6 +36,14 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.status, siteCloneId])
 
+  function clearSession() {
+    if (screenshotRef.current) URL.revokeObjectURL(screenshotRef.current)
+    screenshotRef.current = null
+    setScreenshotUrl(null)
+    setSession(null)
+    setText('')
+  }
+
   async function start() {
     setBusy(true)
     setError(null)
@@ -61,6 +70,7 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
       setSession(nextSession)
       setError(null)
     } catch (requestError) {
+      if (sessionUnavailable(requestError)) clearSession()
       setError(message(requestError, 'Không cập nhật được phiên trình duyệt.'))
     }
   }
@@ -72,6 +82,7 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
       setSession(await webLensService.sendSiteCloneBrowserAction(siteCloneId, action))
       await refresh()
     } catch (requestError) {
+      if (sessionUnavailable(requestError)) clearSession()
       setError(message(requestError, 'Không gửi được thao tác tới trình duyệt.'))
     } finally {
       setBusy(false)
@@ -100,6 +111,7 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
     try {
       setSession(await webLensService.readySiteCloneBrowserSession(siteCloneId))
     } catch (requestError) {
+      if (sessionUnavailable(requestError)) clearSession()
       setError(message(requestError, 'Không thể xác nhận đăng nhập.'))
     } finally {
       setBusy(false)
@@ -110,10 +122,7 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
     setBusy(true)
     try {
       await webLensService.closeSiteCloneBrowserSession(siteCloneId)
-      if (screenshotRef.current) URL.revokeObjectURL(screenshotRef.current)
-      screenshotRef.current = null
-      setScreenshotUrl(null)
-      setSession(null)
+      clearSession()
       setError(null)
     } catch (requestError) {
       setError(message(requestError, 'Không thể đóng phiên trình duyệt.'))
@@ -123,7 +132,7 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
   }
 
   if (!session) {
-    return <section className="managed-browser"><h3>Website cần đăng nhập?</h3><p>Mở trình duyệt tạm thời để tự nhập tài khoản hoặc OTP. Phiên tự xóa sau 10 phút.</p><button className="button button--secondary" type="button" onClick={() => void start()} disabled={busy}>{busy ? 'Đang mở…' : 'Mở phiên đăng nhập'}</button>{error ? <p role="alert" className="clone-alert">{error}</p> : null}</section>
+    return <section className="managed-browser" aria-busy={busy}><h3>Website cần đăng nhập?</h3><p>Mở trình duyệt tạm thời để tự nhập tài khoản hoặc OTP. Phiên tự xóa sau 10 phút.</p><button className="button button--secondary" type="button" onClick={() => void start()} disabled={busy}>{busy ? 'Đang mở…' : 'Mở phiên đăng nhập'}</button>{error ? <p role="alert" className="clone-alert">{error}</p> : null}</section>
   }
 
   return <section className="managed-browser" aria-busy={busy}>
@@ -147,5 +156,11 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
 }
 
 function message(error: unknown, fallback: string): string {
+  if (sessionUnavailable(error)) return 'Phiên trình duyệt đã đóng. Mở lại phiên đăng nhập để tiếp tục.'
   return error instanceof Error ? error.message : fallback
+}
+
+function sessionUnavailable(error: unknown): boolean {
+  return error instanceof ApiError
+    && (error.code === 'BROWSER_SESSION_NOT_FOUND' || error.code === 'BROWSER_SESSION_UNAVAILABLE')
 }

@@ -100,6 +100,9 @@ export class InteractiveBrowserSessionManager {
         session.activePage = openedPage
       })
       this.sessions.set(siteCloneId, session)
+      browser.on('disconnected', () => {
+        if (this.sessions.get(siteCloneId) === session) void this.closeById(siteCloneId)
+      })
       try {
         await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 })
       } catch {
@@ -186,7 +189,8 @@ export class InteractiveBrowserSessionManager {
   private owned(ownerId: string, siteCloneId: string): BrowserSession | null {
     const session = this.sessions.get(siteCloneId)
     if (!session || session.ownerId !== ownerId) return null
-    if (session.expiresAt <= Date.now()) {
+    if (session.expiresAt <= Date.now() || !session.browser.isConnected()
+        || (session.activePage.isClosed() && session.context.pages().every((page) => page.isClosed()))) {
       void this.closeById(siteCloneId)
       return null
     }

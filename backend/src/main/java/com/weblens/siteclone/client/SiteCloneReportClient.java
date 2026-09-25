@@ -29,6 +29,7 @@ import org.springframework.web.client.RestClientResponseException;
 public class SiteCloneReportClient {
 
     private final RestClient client;
+    private final RestClient browserSessionClient;
     private final CaptureProperties properties;
     private final int maxInMemoryArtifactBytes;
 
@@ -45,6 +46,13 @@ public class SiteCloneReportClient {
         this.client = builder.clone()
                 .baseUrl(properties.reportBaseUrl().toString())
                 .requestFactory(factory)
+                .build();
+        SimpleClientHttpRequestFactory browserSessionFactory = new SimpleClientHttpRequestFactory();
+        browserSessionFactory.setConnectTimeout(properties.connectTimeout());
+        browserSessionFactory.setReadTimeout(properties.browserSessionReadTimeout());
+        this.browserSessionClient = builder.clone()
+                .baseUrl(properties.reportBaseUrl().toString())
+                .requestFactory(browserSessionFactory)
                 .build();
     }
 
@@ -136,7 +144,7 @@ public class SiteCloneReportClient {
             String targetUrl
     ) {
         try {
-            return client.post()
+            return browserSessionClient.post()
                     .uri("/internal/v1/browser-sessions/site-clones/{id}", siteCloneId)
                     .header("X-WebLens-Service-Token", properties.serviceToken())
                     .contentType(MediaType.APPLICATION_JSON)
@@ -145,7 +153,7 @@ public class SiteCloneReportClient {
         } catch (RestClientResponseException exception) {
             throw browserSessionFailure(exception);
         } catch (RestClientException exception) {
-            throw unavailable(exception);
+            throw browserSessionUnavailable(exception);
         }
     }
 
@@ -160,7 +168,7 @@ public class SiteCloneReportClient {
             if (exception.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) return null;
             throw browserSessionFailure(exception);
         } catch (RestClientException exception) {
-            throw unavailable(exception);
+            throw browserSessionUnavailable(exception);
         }
     }
 
@@ -174,7 +182,7 @@ public class SiteCloneReportClient {
             byte[] body = response.getBody();
             if (body == null || body.length == 0 || body.length > 5_242_880
                     || !MediaType.IMAGE_JPEG.equals(response.getHeaders().getContentType())) {
-                throw unavailable(null);
+                throw browserSessionUnavailable(null);
             }
             return body;
         } catch (RestClientResponseException exception) {
@@ -183,7 +191,7 @@ public class SiteCloneReportClient {
             }
             throw browserSessionFailure(exception);
         } catch (RestClientException exception) {
-            throw unavailable(exception);
+            throw browserSessionUnavailable(exception);
         }
     }
 
@@ -209,7 +217,7 @@ public class SiteCloneReportClient {
         } catch (RestClientResponseException exception) {
             if (exception.getStatusCode().value() != HttpStatus.NOT_FOUND.value()) throw browserSessionFailure(exception);
         } catch (RestClientException exception) {
-            throw unavailable(exception);
+            throw browserSessionUnavailable(exception);
         }
     }
 
@@ -228,7 +236,7 @@ public class SiteCloneReportClient {
         } catch (RestClientResponseException exception) {
             throw browserSessionFailure(exception);
         } catch (RestClientException exception) {
-            throw unavailable(exception);
+            throw browserSessionUnavailable(exception);
         }
     }
 
@@ -242,7 +250,17 @@ public class SiteCloneReportClient {
                     "Another browser login session is active or this session is already ready."
             );
         }
-        return unavailable(exception);
+        return browserSessionUnavailable(exception);
+    }
+
+    private static ApiException browserSessionUnavailable(Throwable cause) {
+        return new ApiException(
+                HttpStatus.SERVICE_UNAVAILABLE,
+                "BROWSER_SESSION_UNAVAILABLE",
+                "Login browser unavailable",
+                "The login browser is unavailable. Open a new session to continue.",
+                cause
+        );
     }
 
     private static String filename(HttpHeaders headers) {

@@ -17,6 +17,7 @@ public record CaptureProperties(
         @NotBlank @Size(min = 32, max = 512) String serviceToken,
         @NotNull Duration connectTimeout,
         @NotNull Duration readTimeout,
+        @NotNull Duration browserSessionReadTimeout,
         @NotNull Duration outboxLease
 ) {
     public CaptureProperties {
@@ -25,6 +26,7 @@ public record CaptureProperties(
         requireHttpUrl(reportBaseUrl, "reportBaseUrl");
         requireRange(connectTimeout, Duration.ofMillis(100), Duration.ofSeconds(30), "connectTimeout");
         requireRange(readTimeout, Duration.ofMillis(100), Duration.ofMinutes(1), "readTimeout");
+        requireRange(browserSessionReadTimeout, Duration.ofSeconds(1), Duration.ofMinutes(1), "browserSessionReadTimeout");
         requireRange(outboxLease, Duration.ofSeconds(5), Duration.ofMinutes(5), "outboxLease");
     }
 
