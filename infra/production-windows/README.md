@@ -15,6 +15,15 @@ The Capture Worker uses pinned Camoufox by default; its Windows binary is
 checksum-verified and included in each release. Chromium is retained and can
 be selected explicitly with `CAPTURE_BROWSER_ENGINE=playwright`.
 
+Headless Camoufox disables the Gamepad API on Windows. On the production Server
+2019 host, calling `navigator.getGamepads()` from a service reproducibly terminated
+both Chromium and Camoufox with exit code `0xe0464645`; the same Camoufox fixture
+survived with `dom.gamepad.enabled=false`. Mouse, keyboard, screenshots and proxy
+guards remain enabled. Keep production on `CAPTURE_BROWSER_ENGINE=camoufox` with
+this fix: the Chromium override does not receive the Firefox preference and is
+not a remedy for this service-host crash. The Windows release smoke test probes
+gamepad access and verifies that the browser still accepts login input.
+
 Run `bootstrap.ps1` once after the first release junction exists. It registers
 `WebLensDeployPoll`, which checks the public GitHub deployment release every five
 minutes, verifies its SHA-256, and calls `deploy.ps1`. The script runs only the

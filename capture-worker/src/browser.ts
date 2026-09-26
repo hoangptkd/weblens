@@ -78,6 +78,9 @@ export async function launchCaptureBrowser(
       exclude_addons: ['UBO'],
       proxy: { server: proxyUrl },
       firefox_user_prefs: {
+        // Windows Session 0 can fail-fast in native gamepad discovery. Capture/login
+        // needs mouse and keyboard, not physical controllers; disable before startup.
+        ...(process.platform === 'win32' && settings.headless ? { 'dom.gamepad.enabled': false } : {}),
         // Firefox normally bypasses proxies for loopback. WebLens requires every
         // HTTP(S) request to reach SafeProxy so DNS rebinding/private egress stays blocked.
         'network.proxy.allow_hijacking_localhost': true,

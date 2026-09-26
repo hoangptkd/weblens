@@ -111,6 +111,23 @@ for (const engine of ['playwright', 'camoufox'] satisfies BrowserEngine[]) {
           if (code) observedCodes.push(code)
         })
         await page.goto('https://example.com/fixture')
+        if (engine === 'camoufox' && process.platform === 'win32' && headless) {
+          // Regression: either API polling or registering a listener must not start
+          // Windows.Gaming.Input in a noninteractive service and kill the browser.
+          assert.equal(await page.evaluate(() => {
+            window.addEventListener('gamepadconnected', () => undefined)
+            navigator.getGamepads?.()
+            return typeof navigator.getGamepads
+          }), 'undefined')
+          await new Promise<void>((resolve) => setTimeout(resolve, 5_000))
+          assert.ok(browser.isConnected())
+          await page.setContent('<input aria-label="Login"><button>Continue</button>')
+          await page.getByRole('textbox', { name: 'Login' }).click()
+          await page.keyboard.insertText('fixture-user')
+          assert.equal(await page.getByRole('textbox', { name: 'Login' }).inputValue(), 'fixture-user')
+          await page.getByRole('button', { name: 'Continue' }).click()
+          await page.goto('https://example.com/fixture')
+        }
         await page.addScriptTag({url:'https://challenges.cloudflare.com/fixture.js'})
         assert.deepEqual(observedCodes, ['600010'])
         assert.equal(await page.title(), 'Local browser fixture')
