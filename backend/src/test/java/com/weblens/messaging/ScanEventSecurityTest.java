@@ -4,6 +4,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.BDDMockito.given;
 import static org.mockito.BDDMockito.then;
 import static org.mockito.Mockito.never;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
@@ -103,6 +104,16 @@ class ScanEventSecurityTest {
                         .content(VALID_EVENT))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.outcome").value("APPLIED"));
+    }
+
+    @Test
+    void actuatorMetricsRequireServiceToken() throws Exception {
+        mvc.perform(get("/actuator/metrics"))
+                .andExpect(status().isUnauthorized())
+                .andExpect(jsonPath("$.code").value("SERVICE_AUTHENTICATION_REQUIRED"));
+
+        mvc.perform(get("/actuator/metrics").header("X-WebLens-Service-Token", TOKEN))
+                .andExpect(status().isNotFound());
     }
 
     @Test
