@@ -115,6 +115,7 @@ weblens:
     service-token: ${WEBLENS_SERVICE_TOKEN}
     connect-timeout: ${WEBLENS_CAPTURE_CONNECT_TIMEOUT:PT2S}
     read-timeout: ${WEBLENS_CAPTURE_READ_TIMEOUT:PT10S}
+    browser-session-read-timeout: ${WEBLENS_BROWSER_SESSION_READ_TIMEOUT:PT45S}
     outbox-lease: ${WEBLENS_CAPTURE_OUTBOX_LEASE:PT30S}
     dispatch-enabled: ${WEBLENS_CAPTURE_DISPATCH_ENABLED:true}
     dispatch-poll-interval: ${WEBLENS_CAPTURE_DISPATCH_POLL_INTERVAL:PT0.5S}
