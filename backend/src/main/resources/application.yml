@@ -40,6 +40,8 @@ server:
     include-stacktrace: never
   shutdown: graceful
   tomcat:
+    mbeanregistry:
+      enabled: true
     # NIO có thể giữ nhiều connection hơn số thread xử lý. Đây là trần cấu hình,
     # không phải tuyên bố một máy đã benchmark thành công 100.000 client.
     max-connections: ${WEBLENS_TOMCAT_MAX_CONNECTIONS:100000}

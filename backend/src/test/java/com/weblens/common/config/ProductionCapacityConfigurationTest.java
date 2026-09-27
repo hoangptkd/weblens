@@ -35,6 +35,9 @@ class ProductionCapacityConfigurationTest {
                     "server.tomcat.threads.max", Integer.class
             )).isEqualTo(512);
             assertThat(context.getEnvironment().getProperty(
+                    "server.tomcat.mbeanregistry.enabled", Boolean.class
+            )).isTrue();
+            assertThat(context.getEnvironment().getProperty(
                     "spring.datasource.hikari.maximum-pool-size", Integer.class
             )).isEqualTo(64);
         });
