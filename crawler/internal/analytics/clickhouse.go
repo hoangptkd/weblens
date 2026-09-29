@@ -150,35 +150,43 @@ type batchTiming struct {
 
 func (s *Sink) writeBatch(ctx context.Context, batches []model.AnalyticsBatch, timing *batchTiming) map[uuid.UUID]error {
 	results := make(map[uuid.UUID]error, len(batches))
-	pending := make([]preparedAnalytics, 0, len(batches))
+	decoded := make([]preparedAnalytics, 0, len(batches))
 	for _, batch := range batches {
 		payload, err := decodeAnalyticsBatch(batch)
 		if err != nil {
 			results[batch.ID] = err
 			continue
 		}
-		started := time.Now()
-		exists, err := s.receiptExists(ctx, batch, payload)
-		if timing != nil {
-			timing.receiptChecks++
-			timing.receiptLookup += time.Since(started)
-		}
-		if err != nil {
-			results[batch.ID] = err
+		decoded = append(decoded, preparedAnalytics{outbox: batch, payload: payload})
+	}
+	if len(decoded) == 0 {
+		return results
+	}
+
+	started := time.Now()
+	receipts, err := s.receiptIDs(ctx, decoded)
+	if timing != nil {
+		timing.receiptChecks = len(decoded)
+		timing.receiptLookup = time.Since(started)
+	}
+	if err != nil {
+		return sharedFailure(results, decoded, err)
+	}
+
+	pending := make([]preparedAnalytics, 0, len(decoded))
+	for _, item := range decoded {
+		if _, exists := receipts[item.outbox.ID]; exists {
+			results[item.outbox.ID] = nil
 			continue
 		}
-		if exists {
-			results[batch.ID] = nil
-			continue
-		}
-		pending = append(pending, preparedAnalytics{outbox: batch, payload: payload})
+		pending = append(pending, item)
 	}
 	if len(pending) == 0 {
 		return results
 	}
 
-	started := time.Now()
-	err := s.insertPageMetrics(ctx, pending)
+	started = time.Now()
+	err = s.insertPageMetrics(ctx, pending)
 	if timing != nil {
 		timing.insertMetrics = time.Since(started)
 	}
@@ -239,18 +247,34 @@ func decodeAnalyticsBatch(batch model.AnalyticsBatch) (model.AnalyticsPayload, e
 	return payload, nil
 }
 
-func (s *Sink) receiptExists(ctx context.Context, batch model.AnalyticsBatch, payload model.AnalyticsPayload) (bool, error) {
-	var existing uint64
-	err := s.connection.QueryRow(ctx, fmt.Sprintf(`
-        SELECT count()
-        FROM %s.ingestion_receipts FINAL
-        WHERE owner_id = ? AND aggregate_id = ? AND batch_id = ?`, quoteIdentifier(s.database)),
-		payload.OwnerID, payload.ScanID, batch.ID,
-	).Scan(&existing)
-	if err != nil {
-		return false, fmt.Errorf("read ClickHouse ingestion receipt: %w", err)
+func (s *Sink) receiptIDs(ctx context.Context, items []preparedAnalytics) (map[uuid.UUID]struct{}, error) {
+	keys := make([]clickhouseDriver.GroupSet, 0, len(items))
+	for _, item := range items {
+		keys = append(keys, clickhouseDriver.GroupSet{Value: []any{
+			item.payload.OwnerID, item.payload.ScanID, item.outbox.ID,
+		}})
 	}
-	return existing > 0, nil
+	rows, err := s.connection.Query(ctx, fmt.Sprintf(`
+        SELECT batch_id
+        FROM %s.ingestion_receipts FINAL
+		WHERE (owner_id, aggregate_id, batch_id) IN (?)`, quoteIdentifier(s.database)), keys,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("read ClickHouse ingestion receipts: %w", err)
+	}
+	defer rows.Close()
+	receipts := make(map[uuid.UUID]struct{}, len(items))
+	for rows.Next() {
+		var batchID uuid.UUID
+		if err := rows.Scan(&batchID); err != nil {
+			return nil, fmt.Errorf("scan ClickHouse ingestion receipt: %w", err)
+		}
+		receipts[batchID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read ClickHouse ingestion receipts: %w", err)
+	}
+	return receipts, nil
 }
 
 func sharedFailure(results map[uuid.UUID]error, pending []preparedAnalytics, err error) map[uuid.UUID]error {
