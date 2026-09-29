@@ -41,10 +41,16 @@ func TestClickHouseBatchIntegration(t *testing.T) {
 		newAnalyticsBatch(t, ownerID, scanID, "https://example.com/", "INFO"),
 		newAnalyticsBatch(t, ownerID, scanID, "https://example.com/about", "WARNING"),
 	}
-	for batchID, writeErr := range sink.WriteBatch(ctx, batches) {
+	var timing batchTiming
+	for batchID, writeErr := range sink.writeBatch(ctx, batches, &timing) {
 		if writeErr != nil {
 			t.Fatalf("write batch %s: %v", batchID, writeErr)
 		}
+	}
+	if timing.receiptChecks != len(batches) || timing.receiptLookup <= 0 ||
+		timing.insertMetrics <= 0 || timing.insertFindings <= 0 ||
+		timing.insertLinks <= 0 || timing.insertReceipts <= 0 {
+		t.Fatalf("incomplete analytics stage timing: %+v", timing)
 	}
 	for batchID, writeErr := range sink.WriteBatch(ctx, batches) {
 		if writeErr != nil {

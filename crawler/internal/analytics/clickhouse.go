@@ -136,6 +136,19 @@ type preparedAnalytics struct {
 }
 
 func (s *Sink) WriteBatch(ctx context.Context, batches []model.AnalyticsBatch) map[uuid.UUID]error {
+	return s.writeBatch(ctx, batches, nil)
+}
+
+type batchTiming struct {
+	receiptChecks  int
+	receiptLookup  time.Duration
+	insertMetrics  time.Duration
+	insertFindings time.Duration
+	insertLinks    time.Duration
+	insertReceipts time.Duration
+}
+
+func (s *Sink) writeBatch(ctx context.Context, batches []model.AnalyticsBatch, timing *batchTiming) map[uuid.UUID]error {
 	results := make(map[uuid.UUID]error, len(batches))
 	pending := make([]preparedAnalytics, 0, len(batches))
 	for _, batch := range batches {
@@ -144,7 +157,12 @@ func (s *Sink) WriteBatch(ctx context.Context, batches []model.AnalyticsBatch) m
 			results[batch.ID] = err
 			continue
 		}
+		started := time.Now()
 		exists, err := s.receiptExists(ctx, batch, payload)
+		if timing != nil {
+			timing.receiptChecks++
+			timing.receiptLookup += time.Since(started)
+		}
 		if err != nil {
 			results[batch.ID] = err
 			continue
@@ -159,16 +177,36 @@ func (s *Sink) WriteBatch(ctx context.Context, batches []model.AnalyticsBatch) m
 		return results
 	}
 
-	if err := s.insertPageMetrics(ctx, pending); err != nil {
+	started := time.Now()
+	err := s.insertPageMetrics(ctx, pending)
+	if timing != nil {
+		timing.insertMetrics = time.Since(started)
+	}
+	if err != nil {
 		return sharedFailure(results, pending, err)
 	}
-	if err := s.insertFindings(ctx, pending); err != nil {
+	started = time.Now()
+	err = s.insertFindings(ctx, pending)
+	if timing != nil {
+		timing.insertFindings = time.Since(started)
+	}
+	if err != nil {
 		return sharedFailure(results, pending, err)
 	}
-	if err := s.insertLinks(ctx, pending); err != nil {
+	started = time.Now()
+	err = s.insertLinks(ctx, pending)
+	if timing != nil {
+		timing.insertLinks = time.Since(started)
+	}
+	if err != nil {
 		return sharedFailure(results, pending, err)
 	}
-	if err := s.insertReceipts(ctx, pending); err != nil {
+	started = time.Now()
+	err = s.insertReceipts(ctx, pending)
+	if timing != nil {
+		timing.insertReceipts = time.Since(started)
+	}
+	if err != nil {
 		return sharedFailure(results, pending, err)
 	}
 	for _, item := range pending {
