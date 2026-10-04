@@ -86,6 +86,33 @@ class ScanEventServiceTest {
         then(scans).should(never()).findByIdAndRequestedByUserIdForUpdate(scanId, ownerId);
     }
 
+    @Test
+    void delayedTerminalEventAfterQueuedCancellationIsAppliedInsteadOfIgnoredStale() {
+        UUID scanId = UUID.randomUUID();
+        UUID ownerId = UUID.randomUUID();
+        ScanEntity scan = scan(scanId, ownerId);
+        scan.requestCancellation(NOW.minusSeconds(1));
+        ScanEventEnvelope completed = new ScanEventEnvelope(
+                UUID.randomUUID(), "SCAN", scanId, 3001, "SCAN_PROGRESS", 1,
+                UUID.randomUUID(), NOW.minusSeconds(5),
+                new ScanProgressPayload(scanId, ownerId, "COMPLETED", 25, 0, 25, 25, 0,
+                        25, 25, null, null)
+        );
+        given(scans.findByIdAndRequestedByUserIdForUpdate(scanId, ownerId)).willReturn(Optional.of(scan));
+
+        assertThat(service.consume(completed).outcome()).isEqualTo("APPLIED");
+        assertThat(scan.getStatus()).isEqualTo(ScanStatus.COMPLETED);
+        assertThat(scan.getRemoteExecutionVersion()).isEqualTo(3001);
+        then(messages).should().insertInbox(eq(completed), any(byte[].class), eq("APPLIED"), eq(NOW));
+        then(siteCloneCoordinator).should().onScanProjectionApplied(scan, completed.correlationId(), NOW);
+
+        // A delayed older progress event cannot replace the final result or dispatch another clone.
+        ScanEventEnvelope older = event(scanId, ownerId, UUID.randomUUID(), 3000);
+        assertThat(service.consume(older).outcome()).isEqualTo("IGNORED_STALE");
+        assertThat(scan.getStatus()).isEqualTo(ScanStatus.COMPLETED);
+        then(siteCloneCoordinator).should(never()).onScanProjectionApplied(scan, older.correlationId(), NOW);
+    }
+
     private ScanEntity scan(UUID scanId, UUID ownerId) {
         return new ScanEntity(
                 scanId, UUID.randomUUID(), ownerId, CONFIG, "crawler-v1", null, null,

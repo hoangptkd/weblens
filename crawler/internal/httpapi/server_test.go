@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/weblens-project/weblens-crawler/internal/contracts"
 	"github.com/weblens-project/weblens-crawler/internal/model"
+	"github.com/weblens-project/weblens-crawler/internal/postgres"
 )
 
 const testServiceToken = "test-service-token-that-is-at-least-32-bytes"
@@ -138,4 +141,58 @@ func TestPageCursorIsBoundToFilters(t *testing.T) {
 
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
+type reportTestStore struct {
+	fakeCommandStore
+	state      model.ReportState
+	stateError error
+	reads      int
+}
+
+func (s *reportTestStore) GetReportState(_ context.Context, owner, scan uuid.UUID) (model.ReportState, error) {
+	state := s.state
+	state.OwnerID, state.ScanID = owner, scan
+	return state, s.stateError
+}
+
+func (s *reportTestStore) ListPages(context.Context, uuid.UUID, uuid.UUID, int, string, uuid.UUID, model.PageFilters) ([]model.ReportPage, bool, error) {
+	s.reads++
+	return nil, false, errors.New("ClickHouse unavailable")
+}
+
+func TestEmptyReportShortcutKeepsValidationAndDoesNotHidePendingAnalytics(t *testing.T) {
+	for _, tc := range []struct {
+		name, query                        string
+		expected, published, status, reads int
+		stateError                         error
+	}{
+		{name: "empty", status: 200},
+		{name: "bad filter", query: "&outcome=invalid", status: 400},
+		{name: "bad cursor", query: "&cursor=invalid", status: 400},
+		{name: "bad limit", query: "&limit=0", status: 400},
+		{name: "wrong owner or missing scan", stateError: postgres.ErrReportNotFound, status: 404},
+		{name: "state unavailable", stateError: errors.New("database unavailable"), status: 503},
+		{name: "unacknowledged writes", expected: 1, status: 503, reads: 1},
+		{name: "published data", expected: 1, published: 1, status: 503, reads: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &reportTestStore{state: model.ReportState{Status: "QUEUED",
+				AnalyticsExpectedCount: tc.expected, AnalyticsPublishedCount: tc.published}, stateError: tc.stateError}
+			server := NewServer(store, store, testServiceToken, testLogger())
+			request := httptest.NewRequest(http.MethodGet, "/internal/v1/reports/scans/"+uuid.NewString()+"/pages?ownerId="+uuid.NewString()+tc.query, nil)
+			request.Header.Set("X-WebLens-Service-Token", testServiceToken)
+			response := httptest.NewRecorder()
+			server.Handler().ServeHTTP(response, request)
+			if response.Code != tc.status || store.reads != tc.reads {
+				t.Fatalf("status=%d reads=%d, want status=%d reads=%d", response.Code, store.reads, tc.status, tc.reads)
+			}
+			if response.Code == 200 {
+				var report model.ScanPagesReport
+				if err := json.Unmarshal(response.Body.Bytes(), &report); err != nil || report.Items == nil || len(report.Items) != 0 || report.NextCursor != "" || report.Summary.TotalURLCount != 0 {
+					t.Fatalf("invalid empty report: %s", response.Body.String())
+				}
+			}
+		})
+	}
 }

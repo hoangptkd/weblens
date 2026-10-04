@@ -42,7 +42,7 @@ function statusCopy(status: ScanStatus) {
     case 'QUEUED':
       return { title: 'Đang chờ crawler nhận việc', detail: 'Yêu cầu đã được lưu bền vững và đang chờ dispatch.' }
     case 'RUNNING':
-      return { title: 'Crawler đang thu thập bằng chứng', detail: 'Tiến độ được đồng bộ từ Control Plane mỗi 2 giây.' }
+      return { title: 'Crawler đang thu thập bằng chứng', detail: 'Tiến độ được cập nhật tự động trong khi lần quét hoạt động.' }
     case 'CANCEL_REQUESTED':
       return { title: 'Đang dừng an toàn', detail: 'Worker hoàn tất phần việc đang giữ lease trước khi kết thúc.' }
     case 'COMPLETED':
@@ -153,7 +153,7 @@ export function ScanPage() {
   const currentCursor = cursorHistory[pageIndex]
 
   const scanState = useAsyncData(() => webLensService.getScan(scanId), `scan:${scanId}`, {
-    pollIntervalMs: 2000,
+    pollIntervalMs: (scan) => scan?.status === 'QUEUED' ? 10000 : scan?.status === 'CANCEL_REQUESTED' ? 2000 : 3000,
     shouldPoll: (scan) => !isTerminal(scan.status),
     shouldPollOnError: () => false,
   })
@@ -163,11 +163,12 @@ export function ScanPage() {
   const active = !isTerminal(displayedStatus)
   const pagesState = useAsyncData(
     () => webLensService.listScanPages(scanId, currentCursor, 100, activeFilters),
-    `scan-pages:${scanId}:${filterKey}:${currentCursor ?? 'first'}`,
+    `scan-pages:${scanId}:${filterKey}:${currentCursor ?? 'first'}:${active ? 'active' : 'terminal'}`,
     {
-    pollIntervalMs: 2500,
-    shouldPoll: () => active,
-    shouldPollOnError: () => active,
+      enabled: scanState.data !== null && displayedStatus !== 'QUEUED',
+      pollIntervalMs: () => tab === 'overview' ? 10000 : 5000,
+      shouldPoll: () => active,
+      shouldPollOnError: () => active,
     },
   )
 
@@ -317,8 +318,8 @@ export function ScanPage() {
             <div className={`scan-report-notice ${report ? 'scan-report-notice--stale' : ''}`} role="status">
               <RefreshCw />
               <div>
-                <strong>{report ? 'Dữ liệu trang có thể đã cũ' : 'Crawler đang chuẩn bị báo cáo'}</strong>
-                <span>{report ? 'Lần làm mới gần nhất thất bại; dữ liệu đã tải vẫn được giữ nguyên.' : 'Endpoint báo cáo chưa sẵn sàng. WebLens sẽ tự thử lại trong khi scan còn hoạt động.'}</span>
+                <strong>{report ? 'Dữ liệu trang có thể đã cũ' : active ? 'Crawler đang chuẩn bị báo cáo' : 'Báo cáo trang không khả dụng'}</strong>
+                <span>{report ? 'Lần làm mới gần nhất thất bại; dữ liệu đã tải vẫn được giữ nguyên.' : active ? 'Endpoint báo cáo chưa sẵn sàng. WebLens sẽ tự thử lại trong khi scan còn hoạt động.' : 'Không tải được báo cáo cho lần quét đã kết thúc. Hãy thử tải lại trang sau.'}</span>
               </div>
             </div>
           ) : null}

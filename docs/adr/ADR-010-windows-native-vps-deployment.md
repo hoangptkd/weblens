@@ -6,6 +6,8 @@ Supersedes: the production runtime and self-hosted PostgreSQL decisions in ADR-0
 
 The GitHub Actions-to-VPS SSH transfer was superseded by the VPS pull workflow in
 ADR-016 on 2026-09-24. The Windows-native runtime and rollback model remain.
+The Neon decision was superseded by ADR-018 on 2026-10-04: production PostgreSQL
+runs locally on the VPS at 127.0.0.1:5433; the other runtime boundaries remain.
 
 ## Context
 

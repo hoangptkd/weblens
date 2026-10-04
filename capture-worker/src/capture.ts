@@ -50,9 +50,11 @@ export async function capturePage(
   command: CaptureCommandPayload,
   options: CapturePageOptions = {},
 ): Promise<CaptureResult> {
-  await assertPublicHttpUrl(command.targetUrl)
-  const proxy = options.browserContext ? null : new SafeProxy()
-  await proxy?.start()
+  const started = Date.now()
+  const deadline = started + command.timeoutSeconds * 1000
+  await withinDeadline(assertPublicHttpUrl(command.targetUrl), deadline)
+  const proxy = options.browserContext ? null : new SafeProxy(command.maxTotalBytes)
+  if (proxy) await withinDeadline(proxy.start(), deadline)
   let browser: Browser | null = null
   let context: BrowserContext | null = options.browserContext ?? null
   let page: import('playwright').Page | null = null
@@ -60,17 +62,25 @@ export async function capturePage(
     if (!context) {
       const browserSettings = readBrowserSettings()
       const viewport = { width: command.viewportWidth, height: command.viewportHeight }
-      browser = await launchCaptureBrowser(proxy!.url(), { ...browserSettings, viewport })
-      context = await browser.newContext({
+      const launchedBrowser = await withinDeadline<Browser>(launchCaptureBrowser(proxy!.url(), {
+        ...browserSettings, viewport, timeoutMillis: operationTimeoutMillis(deadline),
+      }).then(async (launched) => {
+        if (Date.now() >= deadline) {
+          await closeCaptureBrowser(launched)
+          throw new Error('CAPTURE_TIMEOUT')
+        }
+        return launched
+      }), deadline)
+      browser = launchedBrowser
+      context = await withinDeadline(launchedBrowser.newContext({
         ...browserContextSizeOptions(browserSettings.engine, viewport),
         acceptDownloads: false,
         javaScriptEnabled: true,
         serviceWorkers: 'block',
-      })
+      }), deadline)
     }
-    page = await context.newPage()
+    page = await withinDeadline(context.newPage(), deadline)
     observeTurnstileErrors(page, command.captureRequestId)
-  const started = Date.now()
   const requestStarted = new Map<Request, { started: number; sequence: number }>()
   const network: NetworkRecord[] = []
   const candidates: ResponseCandidate[] = []
@@ -108,8 +118,14 @@ export async function capturePage(
     }
   })
 
+  let admittedRequests = 0
+  let requestBudgetExceeded = false
   await page.route('**/*', async (route) => {
     try {
+      if (++admittedRequests > command.maxNetworkRequests) {
+        requestBudgetExceeded = true
+        return await route.abort('blockedbyclient')
+      }
       const target = route.request().url()
       if (!target.startsWith('data:') && !target.startsWith('blob:')) await assertPublicHttpUrl(target)
       await route.continue()
@@ -204,9 +220,8 @@ export async function capturePage(
     }
   })
 
-    const deadline = started + command.timeoutSeconds * 1000
     await page.goto(command.targetUrl, { waitUntil: 'load', timeout: operationTimeoutMillis(deadline) })
-    await settleDynamicContent(page, deadline)
+    await withinDeadline(settleDynamicContent(page, deadline), deadline)
     const remaining = remainingMillis(deadline)
     if (remaining > 0) await page.waitForTimeout(Math.min(5000, remaining))
     if (Date.now() >= deadline) throw new Error('CAPTURE_TIMEOUT')
@@ -237,6 +252,8 @@ export async function capturePage(
     )
     const resourceBodies = collected.bodies
     const bodyBytes = resourceBodies.reduce((total, resource) => total + resource.body.length, 0)
+    proxy?.assertWithinBudget()
+    if (requestBudgetExceeded) throw new Error('CAPTURE_REQUEST_BUDGET_EXCEEDED')
     if (totalTransferBytes > command.maxTotalBytes) throw new Error('CAPTURE_TRANSFER_BUDGET_EXCEEDED')
     const sourceFinalUrl = (await assertPublicHttpUrl(page.url())).toString()
     const reconstruction = await createReconstruction(
@@ -263,9 +280,10 @@ export async function capturePage(
       reconstruction,
     }
   } finally {
-    await page?.close().catch(() => undefined)
-    if (!options.browserContext) await context?.close().catch(() => undefined)
-    if (browser) await closeCaptureBrowser(browser).catch(() => undefined)
+    const cleanupDeadline = Date.now() + 5000
+    if (page) await withinDeadline(page.close(), cleanupDeadline).catch(() => undefined)
+    if (!options.browserContext && context) await withinDeadline(context.close(), cleanupDeadline).catch(() => undefined)
+    if (browser) await withinDeadline(closeCaptureBrowser(browser), cleanupDeadline).catch(() => undefined)
     await proxy?.close().catch(() => undefined)
   }
 }
@@ -310,7 +328,7 @@ async function settleDynamicContent(page: import('playwright').Page, deadline: n
         if (!candidate || candidate.disabled || candidate.insideForm || !isSafeExpansionLabel(candidate.label)) continue
         const visible = await control.isVisible().catch(() => false)
         if (!visible) continue
-        await control.click({ timeout: Math.min(750, remainingMillis(deadline)) }).catch(() => undefined)
+        await control.click({ timeout: Math.max(1, Math.min(750, remainingMillis(deadline))) }).catch(() => undefined)
         expansionClicks += 1
       }
     }
@@ -501,13 +519,13 @@ export async function collectResourceBodies(
         cloneInputs.push(cloneInput(candidate, null, false, resourceWaitReason(bodyResult, candidate)))
         continue
       }
-      const raw = Buffer.from(bodyResult.value)
+      const raw = bodyResult.value
       if (raw.length === 0) {
         cloneInputs.push(cloneInput(candidate, null, false, 'EMPTY_BODY'))
         continue
       }
       const allowed = Math.min(maxResourceBytes, remaining)
-      const body = raw.subarray(0, allowed)
+      const body = Buffer.from(raw.subarray(0, allowed))
       bodies.push({
         resourceId: randomUUID(), sequence: candidate.sequence, url: candidate.publicUrl,
         resourceType: candidate.resourceType, mimeType: candidate.mimeType,

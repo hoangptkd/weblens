@@ -1,6 +1,10 @@
 import { createHash } from 'node:crypto'
-import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { createReadStream, createWriteStream } from 'node:fs'
+import { stat, mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Readable, Transform } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
 import {
   CopyObjectCommand,
   CreateBucketCommand,
@@ -89,12 +93,63 @@ export class ObjectStorage {
     }
   }
 
-  async get(bucket: string, key: string): Promise<Buffer> {
+  async downloadFile(bucket: string, key: string, maximumBytes: number): Promise<{
+    path: string; bytes: number; sha256Hex: string; cleanup: () => Promise<void>
+  }> {
+    if (bucket !== this.config.s3Bucket) throw new Error('INVALID_STORAGE_BUCKET')
+    if (!Number.isSafeInteger(maximumBytes) || maximumBytes <= 0 || maximumBytes > 256 * 1024 * 1024) {
+      throw new Error('ARTIFACT_SIZE_MISMATCH')
+    }
+    const directory = await mkdtemp(join(tmpdir(), 'weblens-download-'))
+    const path = join(directory, 'artifact')
+    const cleanup = () => rm(directory, { recursive: true, force: true })
+    try {
+      const deadline = AbortSignal.timeout(120_000)
+      const result = await this.client.send(new GetObjectCommand({ Bucket: bucket, Key: key }),
+        { abortSignal: deadline })
+      if (!result.Body) throw new Error('ARTIFACT_OBJECT_MISSING')
+      const input = result.Body as Readable
+      if (result.ContentLength !== undefined && result.ContentLength > maximumBytes) {
+        input.destroy()
+        throw new Error('ARTIFACT_SIZE_MISMATCH')
+      }
+      const hash = createHash('sha256')
+      let bytes = 0
+      await pipeline(input, new Transform({
+        transform(chunk: Buffer, _encoding, callback) {
+          bytes += chunk.length
+          if (bytes > maximumBytes) return callback(new Error('ARTIFACT_SIZE_MISMATCH'))
+          hash.update(chunk)
+          callback(null, chunk)
+        },
+      }), createWriteStream(path), { signal: deadline })
+      return { path, bytes, sha256Hex: hash.digest('hex'), cleanup }
+    } catch (error) {
+      await cleanup()
+      const awsError = error as { name?: string; $metadata?: { httpStatusCode?: number } }
+      if (awsError.name === 'NoSuchKey' || awsError.$metadata?.httpStatusCode === 404) throw new Error('ARTIFACT_OBJECT_MISSING')
+      throw error
+    }
+  }
+
+  async get(bucket: string, key: string, maximumBytes = 64 * 1024 * 1024): Promise<Buffer> {
     if (bucket !== this.config.s3Bucket) throw new Error('INVALID_STORAGE_BUCKET')
     try {
       const result = await this.client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
       if (!result.Body) throw new Error('ARTIFACT_OBJECT_MISSING')
-      return Buffer.from(await result.Body.transformToByteArray())
+      const input = result.Body as Readable
+      if (result.ContentLength !== undefined && result.ContentLength > maximumBytes) {
+        input.destroy()
+        throw new Error('ARTIFACT_SIZE_MISMATCH')
+      }
+      const chunks: Buffer[] = []
+      let bytes = 0
+      for await (const chunk of input) {
+        bytes += (chunk as Buffer).length
+        if (bytes > maximumBytes) throw new Error('ARTIFACT_SIZE_MISMATCH')
+        chunks.push(chunk as Buffer)
+      }
+      return Buffer.concat(chunks, bytes)
     } catch (error) {
       const awsError = error as { name?: string; $metadata?: { httpStatusCode?: number } }
       if (awsError.name === 'NoSuchKey' || awsError.name === 'NotFound'

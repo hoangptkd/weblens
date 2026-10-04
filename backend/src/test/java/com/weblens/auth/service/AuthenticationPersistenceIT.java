@@ -4,6 +4,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.weblens.auth.dto.RegisterRequest;
+import com.weblens.auth.dto.LoginRequest;
 import com.weblens.common.exception.UnauthorizedException;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
@@ -14,6 +15,9 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.testcontainers.service.connection.ServiceConnection;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.test.context.bean.override.mockito.MockitoSpyBean;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.test.context.ActiveProfiles;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
@@ -34,6 +38,37 @@ class AuthenticationPersistenceIT {
 
     @Autowired
     private JdbcTemplate jdbc;
+
+    @MockitoSpyBean
+    private PasswordEncoder passwords;
+
+    @Test
+    void loginReleasesReadTransactionBeforeBcryptAndCommitsSession() {
+        var original = register();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            return invocation.callRealMethod();
+        }).when(passwords).matches(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+        var loggedIn = auth.login(new LoginRequest(original.response().user().email(), "test-only-strong-password-2026"));
+        assertThat(loggedIn.response().user().id()).isEqualTo(original.response().user().id());
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM auth_sessions WHERE user_id = ?", Long.class,
+                loggedIn.response().user().id())).isEqualTo(2L);
+    }
+
+    @Test
+    void userDisabledBetweenLookupAndSessionWriteCannotLogIn() {
+        var original = register();
+        org.mockito.Mockito.doAnswer(invocation -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            jdbc.update("UPDATE users SET status = 'DISABLED', version = version + 1 WHERE id = ?",
+                    original.response().user().id());
+            return invocation.callRealMethod();
+        }).when(passwords).matches(org.mockito.ArgumentMatchers.anyString(), org.mockito.ArgumentMatchers.anyString());
+        assertThatThrownBy(() -> auth.login(new LoginRequest(original.response().user().email(), "test-only-strong-password-2026")))
+                .isInstanceOf(UnauthorizedException.class);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM auth_sessions WHERE user_id = ?", Long.class,
+                original.response().user().id())).isEqualTo(1L);
+    }
 
     @Test
     void concurrentRefreshAllowsOnlyOneUseOfOldCredential() throws Exception {

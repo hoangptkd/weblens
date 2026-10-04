@@ -88,6 +88,7 @@ func run(logger *slog.Logger, args []string) error {
 	clickhouseOptions := analytics.Options{
 		Address: cfg.ClickHouseAddress, Database: cfg.ClickHouseDatabase,
 		Username: cfg.ClickHouseUsername, Password: cfg.ClickHousePassword, Secure: cfg.ClickHouseSecure,
+		Logger: logger,
 	}
 	if migrationCommand == "migrate" || migrationCommand == "migrate-postgres" || cfg.MigrateOnStart {
 		if err := postgres.Migrate(startupContext, cfg.PostgresURL); err != nil {

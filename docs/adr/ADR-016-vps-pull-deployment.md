@@ -4,6 +4,10 @@ Trạng thái: Accepted theo yêu cầu deploy tự động, 2026-09-24. Thay đ
 release bằng SSH từ GitHub Actions trong ADR-010; cách đóng gói Windows-native,
 chuyển junction, health check và rollback vẫn được giữ.
 
+Cập nhật 2026-10-04 theo ADR-018: release mới bao gồm browser runtime và
+`node_modules` đã kiểm checksum. Tái sử dụng runtime cũ chỉ là fallback tương thích;
+mô tả ZIP loại runtime bên dưới là quyết định lịch sử đã được thay thế.
+
 ## Lý do
 
 GitHub hosted runner có IP outbound thay đổi. Có runner kết nối SSH tới VPS

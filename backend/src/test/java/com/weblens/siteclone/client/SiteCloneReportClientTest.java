@@ -46,9 +46,9 @@ class SiteCloneReportClientTest {
                     RestClient.builder(), properties(baseUrl), siteCloneProperties()
             );
 
-            var artifact = client.getArtifact(ownerId, siteCloneId, artifactId);
-
-            assertThat(artifact.filename()).isEqualTo(filename);
+            try (var artifact = client.getArtifact(ownerId, siteCloneId, artifactId)) {
+                assertThat(artifact.filename()).isEqualTo(filename);
+            }
         } finally {
             server.stop(0);
         }

@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
-import { mergeResourceMetadata } from './analytics.js'
+import { CaptureAnalytics, mergeResourceMetadata } from './analytics.js'
+import type { Config } from './config.js'
+
+test('readiness rejects a failed ClickHouse ping result', async () => {
+  const analytics = new CaptureAnalytics({ clickhouseUrl: 'http://127.0.0.1:1',
+    clickhouseUsername: 'test', clickhousePassword: 'test', clickhouseDatabase: 'default' } as Config)
+  try {
+    const client = (analytics as unknown as { client: { ping: () => Promise<unknown> } }).client
+    client.ping = async () => ({ success: false, error: new Error('connection refused') })
+    await assert.rejects(analytics.ping(), /CLICKHOUSE_UNAVAILABLE/u)
+    client.ping = async () => ({ success: true })
+    await analytics.ping()
+  } finally { await analytics.close() }
+})
 
 test('ghép network request với captured body theo request sequence', () => {
   const resources = mergeResourceMetadata([

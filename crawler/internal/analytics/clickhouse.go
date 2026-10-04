@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net"
 	"net/url"
 	"sort"
@@ -26,8 +27,11 @@ import (
 )
 
 type Sink struct {
-	connection driver.Conn
-	database   string
+	connection     driver.Conn
+	readConnection driver.Conn
+	readSlots      chan struct{}
+	database       string
+	logger         *slog.Logger
 }
 
 type Options struct {
@@ -36,24 +40,43 @@ type Options struct {
 	Username string
 	Password string
 	Secure   bool
+	Logger   *slog.Logger
 }
 
 func Open(ctx context.Context, options Options) (*Sink, error) {
-	connection, err := openConnection(options, options.Database)
+	// Keep the existing total connection budget of ten, reserving ingestion
+	// capacity so report bursts cannot exhaust the writer's pool.
+	connection, err := openConnection(options, options.Database, 3)
 	if err != nil {
 		return nil, err
 	}
 	if err := connection.Ping(ctx); err != nil {
+		_ = connection.Close()
 		return nil, fmt.Errorf("ping ClickHouse: %w", err)
 	}
-	return &Sink{connection: connection, database: options.Database}, nil
+	readConnection, err := openConnection(options, options.Database, 7)
+	if err != nil {
+		_ = connection.Close()
+		return nil, err
+	}
+	if err := readConnection.Ping(ctx); err != nil {
+		_ = readConnection.Close()
+		_ = connection.Close()
+		return nil, fmt.Errorf("ping ClickHouse report pool: %w", err)
+	}
+	logger := options.Logger
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Sink{connection: connection, readConnection: readConnection, readSlots: make(chan struct{}, 7), database: options.Database, logger: logger}, nil
 }
 
 func Migrate(ctx context.Context, options Options) error {
-	connection, err := openConnection(options, "default")
+	connection, err := openConnection(options, "default", 10)
 	if err != nil {
 		return err
 	}
+	defer connection.Close()
 	if err := connection.Ping(ctx); err != nil {
 		return fmt.Errorf("ping ClickHouse for migration: %w", err)
 	}
@@ -79,14 +102,14 @@ func Migrate(ctx context.Context, options Options) error {
 	return nil
 }
 
-func openConnection(options Options, database string) (driver.Conn, error) {
+func openConnection(options Options, database string, limit int) (driver.Conn, error) {
 	if strings.TrimSpace(options.Address) == "" || strings.TrimSpace(database) == "" {
 		return nil, errors.New("ClickHouse address and database are required")
 	}
 	connectionOptions := &clickhouseDriver.Options{
 		Addr:        []string{options.Address},
 		Auth:        clickhouseDriver.Auth{Database: database, Username: options.Username, Password: options.Password},
-		DialTimeout: 5 * time.Second, MaxOpenConns: 10, MaxIdleConns: 5,
+		DialTimeout: 5 * time.Second, MaxOpenConns: limit, MaxIdleConns: min(limit, 5),
 		ConnMaxLifetime: 30 * time.Minute,
 		Compression:     &clickhouseDriver.Compression{Method: clickhouseDriver.CompressionLZ4},
 	}
@@ -119,11 +142,11 @@ func splitStatements(script string) []string {
 }
 
 func (s *Sink) Ping(ctx context.Context) error {
-	return s.connection.Ping(ctx)
+	return errors.Join(s.connection.Ping(ctx), s.readConnection.Ping(ctx))
 }
 
 func (s *Sink) Close() error {
-	return s.connection.Close()
+	return errors.Join(s.connection.Close(), s.readConnection.Close())
 }
 
 func (s *Sink) Write(ctx context.Context, batch model.AnalyticsBatch) error {

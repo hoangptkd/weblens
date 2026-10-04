@@ -53,20 +53,32 @@ interface BrowserSession {
 
 export class InteractiveBrowserSessionManager {
   private readonly sessions = new Map<string, BrowserSession>()
+  private readonly pendingStarts = new Map<string, { ownerId: string; result: Promise<BrowserSessionStatus> }>()
   private starting = 0
 
   async start(ownerId: string, siteCloneId: string, targetUrl: string): Promise<BrowserSessionStatus> {
+    const pending = this.pendingStarts.get(siteCloneId)
+    if (pending) {
+      if (pending.ownerId !== ownerId) throw new Error('BROWSER_SESSION_NOT_FOUND')
+      return pending.result
+    }
+    const result = this.startSession(ownerId, siteCloneId, targetUrl)
+      .finally(() => this.pendingStarts.delete(siteCloneId))
+    this.pendingStarts.set(siteCloneId, { ownerId, result })
+    return result
+  }
+
+  private async startSession(ownerId: string, siteCloneId: string, targetUrl: string): Promise<BrowserSessionStatus> {
     const existing = this.owned(ownerId, siteCloneId)
     if (existing) return this.toStatus(existing)
     if (this.sessions.has(siteCloneId)) throw new Error('BROWSER_SESSION_NOT_FOUND')
     if (this.sessions.size + this.starting >= MAX_SESSIONS) throw new Error('BROWSER_SESSION_CAPACITY_REACHED')
-    await assertPublicHttpUrl(targetUrl)
-
     this.starting += 1
     const proxy = new SafeProxy()
     let browser: Browser | null = null
     let context: BrowserContext | null = null
     try {
+      await assertPublicHttpUrl(targetUrl)
       await proxy.start()
       const browserSettings = readBrowserSettings()
       browser = await launchCaptureBrowser(proxy.url(), { ...browserSettings, viewport: VIEWPORT })

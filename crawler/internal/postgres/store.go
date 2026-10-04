@@ -414,7 +414,10 @@ func (s *Store) ClaimPage(ctx context.Context, workerID uuid.UUID, leaseDuration
 				  AND (host.lease_owner IS NULL OR host.lease_expires_at <= $1)
 			  )
 		  )
-		ORDER BY execution.accepted_at, execution.id
+		-- Share eligible slots by occupancy and recent activity. A continuous
+		-- stream of new scans must not have unconditional priority over old work.
+		ORDER BY execution.leased_count,
+		         execution.updated_at, execution.accepted_at, execution.id
 		FOR UPDATE OF execution SKIP LOCKED
 		LIMIT 1`, now, s.hostConcurrency).Scan(&executionID, &targetHostname)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -608,10 +611,22 @@ func insertProgressEvent(ctx context.Context, tx pgx.Tx, executionID, correlatio
             message_id, aggregate_type, aggregate_id, aggregate_version,
             event_type, contract_version, correlation_id, payload, status,
             available_at, created_at
-        ) VALUES ($1, 'SCAN', $2, $3, $4, 1, $5, $6, 'PENDING', $7, $7)
+        ) SELECT $1, 'SCAN', $2, $3, $4, 1, $5, $6, 'PENDING', $7, $7
+        WHERE $8 OR NOT EXISTS (
+            SELECT 1 FROM (
+                SELECT created_at, payload->'payload'->>'status' AS scan_status
+                FROM outbox_events
+                WHERE aggregate_type = 'SCAN' AND aggregate_id = $2
+                ORDER BY aggregate_version DESC LIMIT 1
+            ) latest
+            WHERE latest.created_at > $7::timestamptz - interval '1 second'
+              AND latest.scan_status = $9
+        )
         ON CONFLICT (aggregate_type, aggregate_id, aggregate_version, event_type)
         DO NOTHING`, envelope.MessageID, envelope.AggregateID, envelope.AggregateVersion,
 		envelope.MessageType, correlationID, encoded, now,
+		status == "COMPLETED" || status == "PARTIAL_SUCCESS" || status == "FAILED" || status == "CANCELLED",
+		envelope.Payload.Status,
 	)
 	if err != nil {
 		return fmt.Errorf("insert progress outbox event: %w", err)
@@ -859,7 +874,7 @@ func (s *Store) ClaimAnalytics(ctx context.Context, workerID uuid.UUID, limit in
         WITH candidates AS (
             SELECT id
             FROM analytics_outbox
-            WHERE status = 'PENDING' AND available_at <= clock_timestamp()
+            WHERE status IN ('PENDING', 'DEAD') AND available_at <= clock_timestamp()
             ORDER BY available_at, created_at, id
             FOR UPDATE SKIP LOCKED
             LIMIT $1
@@ -990,7 +1005,7 @@ func (s *Store) RetryAnalytics(ctx context.Context, batch model.AnalyticsBatch, 
 	commandTag, err := s.pool.Exec(ctx, `
         UPDATE analytics_outbox
         SET status = CASE WHEN delivery_attempts >= 20 THEN 'DEAD' ELSE 'PENDING' END,
-            available_at = clock_timestamp() + $1::interval,
+            available_at = clock_timestamp() + CASE WHEN delivery_attempts >= 20 THEN interval '5 minutes' + $1::interval ELSE $1::interval END,
             lease_owner = NULL, lease_expires_at = NULL,
             last_error_code = $2, updated_at = clock_timestamp()
         WHERE id = $3 AND status = 'CLAIMED' AND lease_owner = $4`,
@@ -1008,9 +1023,16 @@ func (s *Store) RetryAnalytics(ctx context.Context, batch model.AnalyticsBatch, 
 func (s *Store) ClaimEvents(ctx context.Context, workerID uuid.UUID, limit int, leaseDuration time.Duration) ([]model.OutboxMessage, error) {
 	rows, err := s.pool.Query(ctx, `
         WITH candidates AS (
-            SELECT message_id FROM outbox_events
-            WHERE status = 'PENDING' AND available_at <= clock_timestamp()
-            ORDER BY available_at, created_at, message_id
+            SELECT pending.message_id FROM outbox_events pending
+            WHERE pending.status IN ('PENDING', 'DEAD') AND pending.available_at <= clock_timestamp()
+              AND NOT EXISTS (
+                  SELECT 1 FROM outbox_events earlier
+                  WHERE earlier.aggregate_type = pending.aggregate_type
+                    AND earlier.aggregate_id = pending.aggregate_id
+                    AND (earlier.status = 'CLAIMED' OR
+                         (earlier.status IN ('PENDING', 'DEAD') AND earlier.aggregate_version < pending.aggregate_version))
+              )
+            ORDER BY pending.available_at, pending.created_at, pending.message_id
             FOR UPDATE SKIP LOCKED LIMIT $1
         )
         UPDATE outbox_events outbox
@@ -1048,7 +1070,8 @@ func (s *Store) CompleteEvent(ctx context.Context, message model.OutboxMessage) 
         UPDATE outbox_events
         SET status = 'DELIVERED', lease_owner = NULL, lease_expires_at = NULL,
             delivered_at = clock_timestamp(), last_error_code = NULL
-        WHERE message_id = $1 AND status = 'CLAIMED' AND lease_owner = $2`,
+        WHERE message_id = $1 AND status = 'CLAIMED' AND lease_owner = $2
+          AND lease_expires_at > clock_timestamp()`,
 		message.MessageID, message.LeaseOwner,
 	)
 	if err != nil {
@@ -1065,7 +1088,7 @@ func (s *Store) RetryEvent(ctx context.Context, message model.OutboxMessage, err
 	commandTag, err := s.pool.Exec(ctx, `
         UPDATE outbox_events
         SET status = CASE WHEN delivery_attempts >= 20 THEN 'DEAD' ELSE 'PENDING' END,
-            available_at = clock_timestamp() + $1::interval,
+            available_at = clock_timestamp() + CASE WHEN delivery_attempts >= 20 THEN interval '5 minutes' + $1::interval ELSE $1::interval END,
             lease_owner = NULL, lease_expires_at = NULL, last_error_code = $2
         WHERE message_id = $3 AND status = 'CLAIMED' AND lease_owner = $4`,
 		delay.String(), boundedErrorCode(errorCode), message.MessageID, message.LeaseOwner,
@@ -1276,7 +1299,8 @@ func shouldRetryPage(result model.PageResult, attempt int) bool {
 	case "timeout", "dns_failed", "network_failed", "body_read_failed":
 		return true
 	}
-	return result.StatusCode == 429 || result.StatusCode >= 500
+	return result.StatusCode == 429 || result.StatusCode == 500 ||
+		result.StatusCode == 502 || result.StatusCode == 503 || result.StatusCode == 504
 }
 
 func pageRetryDelay(attempt int, key uuid.UUID) time.Duration {

@@ -26,6 +26,11 @@ test('duplicate command, lease fencing và analytical completion giữ đúng in
 
   try {
     await database.migrate()
+    await database.migrate()
+    await database.pool.query("update capture_schema_migrations set checksum='tampered' where version='005_bound_site_reconstruction_phases.sql'")
+    await assert.rejects(database.migrate(), /MIGRATION_CHECKSUM_MISMATCH/u)
+    await database.pool.query("update capture_schema_migrations set checksum=null where version='005_bound_site_reconstruction_phases.sql'")
+    await database.migrate()
     const migrations = await database.pool.query<{ version: string }>(
       'select version from capture_schema_migrations order by version',
     )
@@ -97,7 +102,14 @@ test('duplicate command, lease fencing và analytical completion giữ đúng in
     ])
     const claimed = claims.filter((value) => value !== null)
     assert.equal(claimed.length, 1)
-    await database.completeAnalytics(claimed[0]!)
+    await database.pool.query('update analytics_outbox set delivery_attempts=20 where id=$1', [claimed[0]!.id])
+    await database.retryAnalytics(claimed[0]!, 'CLICKHOUSE_DELIVERY_FAILED')
+    assert.equal(await database.claimAnalytics(randomUUID()), null)
+    await database.pool.query('update analytics_outbox set available_at=now() where id=$1', [claimed[0]!.id])
+    const recovered = await database.claimAnalytics(randomUUID())
+    assert.equal(recovered?.id, claimed[0]!.id)
+    assert.deepEqual(recovered?.payload, claimed[0]!.payload)
+    await database.completeAnalytics(recovered!)
 
     const snapshot = await database.getSnapshot(command.payload.ownerId, command.aggregateId)
     assert.equal(snapshot?.['status'], 'COMPLETED')
@@ -146,6 +158,20 @@ test('duplicate command, lease fencing và analytical completion giữ đúng in
       reconstructionId,
     )
     assert.equal(expiredReference?.state, 'DELETED')
+
+    const exhaustedCommand = commandEnvelope()
+    await database.acceptCommand(exhaustedCommand)
+    const exhaustedLease = await database.claimJob(randomUUID())
+    assert.ok(exhaustedLease)
+    await database.pool.query("update capture_jobs set attempt_count=3,lease_expires_at=now()-interval '1 second' where id=$1", [exhaustedLease.id])
+    assert.equal(await database.claimJob(randomUUID()), null)
+    const exhaustedState = await database.pool.query('select status,terminal_code from capture_jobs where id=$1', [exhaustedLease.id])
+    assert.deepEqual(exhaustedState.rows[0], { status: 'FAILED', terminal_code: 'CAPTURE_RETRIES_EXHAUSTED' })
+    const failureEvents = await database.pool.query("select count(*)::integer as count from event_outbox where capture_job_id=$1 and payload->'payload'->>'status'='FAILED'", [exhaustedLease.id])
+    assert.equal(failureEvents.rows[0].count, 1)
+    await database.claimJob(randomUUID())
+    const repeatedEvents = await database.pool.query("select count(*)::integer as count from event_outbox where capture_job_id=$1 and payload->'payload'->>'status'='FAILED'", [exhaustedLease.id])
+    assert.equal(repeatedEvents.rows[0].count, 1)
 
     const cloneFailureCommand = commandEnvelope()
     await database.acceptCommand(cloneFailureCommand)
@@ -419,11 +445,17 @@ test('site clone migration, phase retry, page fencing, cancellation partial và 
       from site_reconstruction_artifacts where site_reconstruction_job_id=$1`, [publishRetryCommand.aggregateId])
     assert.ok(stagingRetention.rows.every((row) => row.state === 'STAGED' && row.expires_within_day))
     await sites.retryAssembly(firstAssembly, 'MINIO_UPLOAD_FAILED')
-    const removedStage = await database.pool.query<{ count: string }>(
-      'select count(*)::text as count from site_reconstruction_artifacts where site_reconstruction_job_id=$1',
+    const expiredStage = await database.pool.query<{ count: string }>(
+      "select count(*)::text as count from site_reconstruction_artifacts where site_reconstruction_job_id=$1 and state='STAGED' and delete_after<=now()",
       [publishRetryCommand.aggregateId],
     )
-    assert.equal(removedStage.rows[0]?.count, '0')
+    assert.equal(expiredStage.rows[0]?.count, '2')
+    for (let index = 0; index < 2; index++) {
+      const deletion = await sites.claimObjectForDeletion()
+      assert.ok(deletion)
+      assert.equal(deletion.jobId, publishRetryCommand.aggregateId)
+      await sites.completeObjectDeletion(deletion)
+    }
     await database.pool.query(
       'update site_reconstruction_jobs set phase_available_at=now() where id=$1',
       [publishRetryCommand.aggregateId],
@@ -431,9 +463,27 @@ test('site clone migration, phase retry, page fencing, cancellation partial và 
     const secondAssembly = await sites.claimAssembly(randomUUID())
     assert.ok(secondAssembly)
     assert.equal((await sites.listBundles(secondAssembly)).length, 1)
-    await sites.publishArtifacts(secondAssembly, stagedArtifacts)
+    await sites.publishArtifacts(secondAssembly, stagedArtifacts.map((artifact) => ({
+      ...artifact, object: { ...artifact.object, key: `${artifact.object.key}/generation-${secondAssembly.leaseGeneration}` },
+    })))
     const published = await sites.getReport(publishRetryCommand.payload.ownerId, publishRetryCommand.aggregateId)
     assert.equal(published?.['status'], 'PUBLISHED')
+    const parallelCommand = siteCloneCommand()
+    parallelCommand.payload.pageConcurrency = 1
+    await sites.acceptCommand(parallelCommand)
+    const parallelIngestion = await sites.claimIngestion(randomUUID())
+    assert.ok(parallelIngestion)
+    assert.equal(parallelIngestion.id, parallelCommand.aggregateId)
+    await sites.addTargets(parallelIngestion, [0, 1, 2].map((ordinal) => {
+      const id = randomUUID()
+      return target(id, ordinal, `https://example.com/${ordinal}`, `pages/${id}.html`)
+    }))
+    await sites.finishIngestion(parallelIngestion)
+    const parallelClaims = await Promise.all(Array.from({ length: 8 }, () => sites.claimPage(randomUUID())))
+    const runningPages = parallelClaims.filter((page) => page?.jobId === parallelCommand.aggregateId)
+    assert.equal(runningPages.length, 1)
+    await sites.completePage(runningPages[0]!, storedObject('parallel-bundle', Buffer.from('bundle')), 6)
+    assert.equal((await sites.claimPage(randomUUID()))?.jobId, parallelCommand.aggregateId)
   } finally {
     await database.close()
     await admin.query(`drop schema "${schemaName}" cascade`)

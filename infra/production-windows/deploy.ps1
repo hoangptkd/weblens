@@ -83,20 +83,41 @@ try {
             }
             $runtime = Get-Content -LiteralPath (Join-Path $unpacked 'capture-worker\runtime.json') -Raw | ConvertFrom-Json
             if ($runtime.nodeModulesLockSha256 -notmatch '^[0-9a-f]{64}$' -or
-                $runtime.camoufoxExeSha256 -notmatch '^[0-9a-f]{64}$' -or
-                -not $previous -or -not (Test-Path -LiteralPath $previous -PathType Container)) {
-                throw 'Compatible browser runtime is unavailable'
+                $runtime.camoufoxExeSha256 -notmatch '^[0-9a-f]{64}$') {
+                throw 'Browser runtime manifest is invalid'
             }
-            $sourceModules = Join-Path $previous 'capture-worker\node_modules'
-            $sourceBrowser = Join-Path $previous 'capture-worker\camoufox'
+            $sourceModules = Join-Path $unpacked 'capture-worker\node_modules'
+            $sourceBrowser = Join-Path $unpacked 'capture-worker\camoufox'
+            $bundledRuntime = (Test-Path -LiteralPath $sourceModules -PathType Container) -and
+                (Test-Path -LiteralPath $sourceBrowser -PathType Container)
+            if (-not $bundledRuntime) {
+                if (-not $previous -or -not (Test-Path -LiteralPath $previous -PathType Container)) {
+                    throw 'Compatible browser runtime is unavailable'
+                }
+                $sourceModules = Join-Path $previous 'capture-worker\node_modules'
+                $sourceBrowser = Join-Path $previous 'capture-worker\camoufox'
+            }
             if ((Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $sourceModules '.package-lock.json')).Hash.ToLowerInvariant() -ne $runtime.nodeModulesLockSha256 -or
                 (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $sourceBrowser 'camoufox.exe')).Hash.ToLowerInvariant() -ne $runtime.camoufoxExeSha256) {
                 throw 'Browser runtime checksum does not match the release'
             }
-            & robocopy.exe $sourceModules (Join-Path $unpacked 'capture-worker\node_modules') /E /R:2 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
-            if ($LASTEXITCODE -ge 8) { throw 'Node runtime copy failed' }
-            & robocopy.exe $sourceBrowser (Join-Path $unpacked 'capture-worker\camoufox') /E /R:2 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
-            if ($LASTEXITCODE -ge 8) { throw 'Camoufox runtime copy failed' }
+            if (-not $bundledRuntime) {
+                & robocopy.exe $sourceModules (Join-Path $unpacked 'capture-worker\node_modules') /E /R:2 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+                if ($LASTEXITCODE -ge 8) { throw 'Node runtime copy failed' }
+                & robocopy.exe $sourceBrowser (Join-Path $unpacked 'capture-worker\camoufox') /E /R:2 /W:1 /NP /NFL /NDL /NJH /NJS | Out-Null
+                if ($LASTEXITCODE -ge 8) { throw 'Camoufox runtime copy failed' }
+            }
+            if ($previous) {
+                $previousMigrations = Join-Path $previous 'capture-worker\migrations\postgresql'
+                foreach ($appliedFile in Get-ChildItem -LiteralPath $previousMigrations -Filter '*.sql' -File) {
+                    $candidateFile = Join-Path $unpacked ('capture-worker\migrations\postgresql\' + $appliedFile.Name)
+                    if (-not (Test-Path -LiteralPath $candidateFile -PathType Leaf) -or
+                        (Get-FileHash -LiteralPath $candidateFile -Algorithm SHA256).Hash -ne
+                        (Get-FileHash -LiteralPath $appliedFile.FullName -Algorithm SHA256).Hash) {
+                        throw ('Applied capture migration changed or disappeared: ' + $appliedFile.Name)
+                    }
+                }
+            }
             if (-not (Test-Path -LiteralPath (Join-Path $unpacked 'capture-worker\camoufox\camoufox.exe') -PathType Leaf)) {
                 throw 'Camoufox browser was not staged'
             }

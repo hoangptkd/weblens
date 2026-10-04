@@ -109,7 +109,7 @@ class CaptureReportClientTest {
     }
 
     @Test
-    void downloadsStaticCloneAsBoundedZip() {
+    void downloadsStaticCloneAsBoundedZip() throws Exception {
         RestClient.Builder builder = RestClient.builder();
         MockRestServiceServer server = MockRestServiceServer.bindTo(builder).build();
         CaptureReportClient client = new CaptureReportClient(
@@ -129,11 +129,11 @@ class CaptureReportClientTest {
                 .andRespond(withSuccess(archive, MediaType.parseMediaType("application/zip"))
                         .header("ETag", etag));
 
-        CaptureArtifactContent artifact = client.getReconstructionArchive(ownerId, reconstructionId);
-
-        assertThat(artifact.bytes()).isEqualTo(archive);
-        assertThat(artifact.contentType()).isEqualTo("application/zip");
-        assertThat(artifact.etag()).isEqualTo(etag);
+        try (CaptureArtifactContent artifact = client.getReconstructionArchive(ownerId, reconstructionId)) {
+            assertThat(artifact.bytes()).isEqualTo(archive);
+            assertThat(artifact.contentType()).isEqualTo("application/zip");
+            assertThat(artifact.etag()).isEqualTo(etag);
+        }
         server.verify();
     }
 

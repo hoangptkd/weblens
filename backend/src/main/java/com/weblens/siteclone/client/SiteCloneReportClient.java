@@ -1,6 +1,7 @@
 package com.weblens.siteclone.client;
 
 import com.weblens.capture.dto.CaptureArtifactContent;
+import com.weblens.capture.client.ArtifactDownload;
 import com.weblens.common.config.CaptureProperties;
 import com.weblens.common.config.SiteCloneProperties;
 import com.weblens.common.exception.ApiException;
@@ -10,13 +11,8 @@ import com.weblens.siteclone.dto.SiteCloneProgressResponse;
 import com.weblens.siteclone.dto.SiteCloneBrowserSessionResponse;
 import com.weblens.common.exception.ConflictException;
 import java.util.Map;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import java.util.UUID;
-import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
-import org.springframework.http.ContentDisposition;
 import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
@@ -31,7 +27,7 @@ public class SiteCloneReportClient {
     private final RestClient client;
     private final RestClient browserSessionClient;
     private final CaptureProperties properties;
-    private final int maxInMemoryArtifactBytes;
+    private final int maxArtifactBytes;
 
     public SiteCloneReportClient(
             RestClient.Builder builder,
@@ -39,7 +35,7 @@ public class SiteCloneReportClient {
             SiteCloneProperties siteCloneProperties
     ) {
         this.properties = properties;
-        this.maxInMemoryArtifactBytes = Math.toIntExact(siteCloneProperties.maxShardBytes());
+        this.maxArtifactBytes = Math.toIntExact(siteCloneProperties.maxShardBytes());
         SimpleClientHttpRequestFactory factory = new SimpleClientHttpRequestFactory();
         factory.setConnectTimeout(properties.connectTimeout());
         factory.setReadTimeout(properties.readTimeout());
@@ -93,17 +89,16 @@ public class SiteCloneReportClient {
     }
 
     public CaptureArtifactContent getArtifact(UUID ownerId, UUID siteCloneId, UUID artifactId) {
-        ResponseEntity<byte[]> response;
         try {
-            response = client.get()
+            return client.get()
                     .uri(uri -> uri.path(
                                     "/internal/v1/reports/site-clones/{siteCloneId}/artifacts/{artifactId}"
                             )
                             .queryParam("ownerId", ownerId)
                             .build(siteCloneId, artifactId))
                     .header("X-WebLens-Service-Token", properties.serviceToken())
-                    .retrieve()
-                    .toEntity(byte[].class);
+                    .exchange((request, response) -> ArtifactDownload.read(response, maxArtifactBytes,
+                            "SITE_CLONE_ARTIFACT_INTEGRITY_FAILED"));
         } catch (RestClientResponseException exception) {
             if (exception.getStatusCode().value() == HttpStatus.NOT_FOUND.value()) {
                 throw new NotFoundException(
@@ -115,27 +110,6 @@ public class SiteCloneReportClient {
         } catch (RestClientException exception) {
             throw unavailable(exception);
         }
-        byte[] body = response.getBody();
-        if (body == null || body.length == 0 || body.length > maxInMemoryArtifactBytes) {
-            throw unavailable(null);
-        }
-        MediaType type = response.getHeaders().getContentType();
-        if (!MediaType.APPLICATION_JSON.equals(type)
-                && !MediaType.parseMediaType("application/zip").equals(type)) {
-            throw unavailable(null);
-        }
-        String etag = response.getHeaders().getFirst(HttpHeaders.ETAG);
-        if (!matchesSha256Etag(body, etag)) {
-            throw new ApiException(
-                    HttpStatus.SERVICE_UNAVAILABLE,
-                    "SITE_CLONE_ARTIFACT_INTEGRITY_FAILED",
-                    "Site-clone artifact integrity check failed",
-                    "The site-clone artifact failed its integrity check."
-            );
-        }
-        return new CaptureArtifactContent(
-                body, type.toString(), etag, filename(response.getHeaders())
-        );
     }
 
     public SiteCloneBrowserSessionResponse startBrowserSession(
@@ -178,7 +152,7 @@ public class SiteCloneReportClient {
                     .uri(uri -> uri.path("/internal/v1/browser-sessions/site-clones/{id}/screenshot")
                             .queryParam("ownerId", ownerId).build(siteCloneId))
                     .header("X-WebLens-Service-Token", properties.serviceToken())
-                    .retrieve().toEntity(byte[].class);
+                    .exchange((request, responseBody) -> ArtifactDownload.readSmall(responseBody, 5_242_880));
             byte[] body = response.getBody();
             if (body == null || body.length == 0 || body.length > 5_242_880
                     || !MediaType.IMAGE_JPEG.equals(response.getHeaders().getContentType())) {
@@ -263,18 +237,6 @@ public class SiteCloneReportClient {
         );
     }
 
-    private static String filename(HttpHeaders headers) {
-        String contentDisposition = headers.getFirst(HttpHeaders.CONTENT_DISPOSITION);
-        if (contentDisposition == null) {
-            return null;
-        }
-        try {
-            return ContentDisposition.parse(contentDisposition).getFilename();
-        } catch (IllegalArgumentException exception) {
-            return null;
-        }
-    }
-
     private static ApiException unavailable(Throwable cause) {
         return new ApiException(
                 HttpStatus.SERVICE_UNAVAILABLE,
@@ -285,16 +247,4 @@ public class SiteCloneReportClient {
         );
     }
 
-    private static boolean matchesSha256Etag(byte[] body, String etag) {
-        if (etag == null || !etag.matches("\"sha256-[0-9a-f]{64}\"")) {
-            return false;
-        }
-        try {
-            byte[] expected = HexFormat.of().parseHex(etag.substring(8, 72));
-            byte[] actual = MessageDigest.getInstance("SHA-256").digest(body);
-            return MessageDigest.isEqual(actual, expected);
-        } catch (IllegalArgumentException | NoSuchAlgorithmException exception) {
-            return false;
-        }
-    }
 }

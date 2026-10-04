@@ -1,4 +1,4 @@
-import { render, screen } from '@testing-library/react'
+import { act, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { afterEach, describe, expect, it, vi } from 'vitest'
@@ -6,7 +6,10 @@ import { webLensService } from '../api/webLensApiService'
 import { ScanPage } from './ScanPage'
 
 describe('ScanPage', () => {
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => {
+    vi.restoreAllMocks()
+    vi.useRealTimers()
+  })
 
   it('dùng cursor của backend khi duyệt page evidence', async () => {
     vi.spyOn(webLensService, 'getScan').mockResolvedValue({
@@ -81,5 +84,45 @@ describe('ScanPage', () => {
       q: undefined,
       indexable: undefined,
     })
+  })
+
+  it('không hứa tự thử lại khi báo cáo của scan đã hủy không khả dụng', async () => {
+    vi.spyOn(webLensService, 'getScan').mockResolvedValue({
+      id: 'scan-cancelled', websiteId: 'site-1', status: 'CANCELLED',
+      createdAt: '27/09/2026', duration: '—',
+      progress: { discovered: 0, queued: 0, processed: 0, succeeded: 0, failed: 0, limit: 100000 },
+    })
+    const pages = vi.spyOn(webLensService, 'listScanPages').mockRejectedValue(new Error('Crawler unavailable'))
+    render(<MemoryRouter initialEntries={['/app/scans/scan-cancelled']}><Routes><Route path="/app/scans/:scanId" element={<ScanPage />} /></Routes></MemoryRouter>)
+
+    await userEvent.click(await screen.findByRole('tab', { name: /Trang 0/i }))
+    expect(await screen.findByText('Báo cáo trang không khả dụng')).toBeInTheDocument()
+    expect(screen.getByText('Không tải được báo cáo cho lần quét đã kết thúc. Hãy thử tải lại trang sau.')).toBeInTheDocument()
+    expect(pages).toHaveBeenCalledTimes(1)
+  })
+
+  it('không tải báo cáo khi đang chờ và tải bản cuối sau khi kết thúc', async () => {
+    vi.useFakeTimers()
+    const scan = { id: 'scan-queued', websiteId: 'site-1', createdAt: '01/10/2026', duration: '—',
+      progress: { discovered: 1, queued: 1, processed: 0, succeeded: 0, failed: 0, limit: 1000 } }
+    const progress = vi.spyOn(webLensService, 'getScan')
+      .mockResolvedValueOnce({ ...scan, status: 'QUEUED' })
+      .mockResolvedValueOnce({ ...scan, status: 'RUNNING' })
+      .mockResolvedValue({ ...scan, status: 'COMPLETED' })
+    const pages = vi.spyOn(webLensService, 'listScanPages').mockResolvedValue({
+      items: [], summary: { totalUrlCount: 1, issuePageCount: 0, findingCount: 0,
+        status2xxCount: 1, status3xxCount: 0, status4xxCount: 0, status5xxCount: 0, noResponseCount: 0 },
+      analyticsExpectedCount: 1, analyticsPublishedCount: 0, analyticsWatermark: '01/10/2026', fresh: false,
+    })
+    render(<MemoryRouter initialEntries={['/app/scans/scan-queued']}><Routes><Route path="/app/scans/:scanId" element={<ScanPage />} /></Routes></MemoryRouter>)
+    await act(async () => undefined)
+    expect(pages).not.toHaveBeenCalled()
+    await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+    expect(pages).toHaveBeenCalledTimes(1)
+    await act(async () => { await vi.advanceTimersByTimeAsync(3000) })
+    expect(pages).toHaveBeenCalledTimes(2)
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+    expect(progress).toHaveBeenCalledTimes(3)
+    expect(pages).toHaveBeenCalledTimes(2)
   })
 })

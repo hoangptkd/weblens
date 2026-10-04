@@ -11,6 +11,10 @@ class ScanStateMachineTest {
     void permitsDocumentedForwardTransitions() {
         assertThatNoException().isThrownBy(() -> ScanStateMachine.requireTransition(
                 ScanStatus.QUEUED,
+                ScanStatus.CANCEL_REQUESTED
+        ));
+        assertThatNoException().isThrownBy(() -> ScanStateMachine.requireTransition(
+                ScanStatus.QUEUED,
                 ScanStatus.RUNNING
         ));
         assertThatNoException().isThrownBy(() -> ScanStateMachine.requireTransition(

@@ -94,6 +94,13 @@ batch, version đến sai thứ tự, `too many parts`, disk pressure, retention
 
 **Important edge cases:** Worker/application restart, stale scan, late page result, concurrent polling.
 
+**Cancellation acceptance:** Cancelling a locally queued or running scan records
+`CANCEL_REQUESTED` until the Crawler confirms a terminal result. A delayed queued
+projection is not proof that remote execution has not started. Late progress must
+not undo a cancellation request; completion committed before remote cancellation
+must remain completion. Repeated cancellation must not enqueue duplicate commands.
+Cancellation state and its command outbox write commit atomically.
+
 ## REPORT-001 — View scan results
 
 **Description:** A user can view scan summary, page outcomes, collected metrics, and findings.

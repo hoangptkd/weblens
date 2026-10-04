@@ -76,7 +76,11 @@ async function execute(path: string, init: RequestInit): Promise<Response> {
     const csrf = readCookie(csrfCookieName)
     if (csrf) headers.set(csrfHeaderName, csrf)
   }
-  return fetch(`${apiBaseUrl}${path}`, { ...init, headers, credentials: 'include' })
+  const timeout = path.includes('/artifacts/') ? 120_000
+    : path.endsWith('/browser-session') && init.method === 'POST' ? 65_000 : 30_000
+  const deadline = AbortSignal.timeout(timeout)
+  const signal = init.signal ? AbortSignal.any([init.signal, deadline]) : deadline
+  return fetch(`${apiBaseUrl}${path}`, { ...init, headers, credentials: 'include', signal })
 }
 
 async function refreshAccessToken(): Promise<boolean> {
@@ -96,6 +100,7 @@ async function performRefresh(): Promise<boolean> {
     method: 'POST',
     credentials: 'include',
     headers: { [csrfHeaderName]: csrf },
+    signal: AbortSignal.timeout(15_000),
   })
   if (!response.ok) {
     accessToken = null

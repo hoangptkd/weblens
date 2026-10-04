@@ -75,6 +75,16 @@ test('body không kết thúc bị giới hạn thời gian và candidate đến
   assert.equal(result.cloneInputs[0]?.skipReason, 'RESOURCE_TIMEOUT')
 })
 
+test('truncated body releases the oversized backing buffer', async () => {
+  const source = Buffer.alloc(8 * 1024 * 1024, 1)
+  const result = await collectResourceBodies([candidate({ body: async () => source })], 1024, 1024, Date.now() + 1000)
+  const body = result.bodies[0]!.body
+  assert.equal(body.length, 1024)
+  assert.ok(body.buffer.byteLength <= 8192)
+  assert.notEqual(body.buffer, source.buffer)
+  assert.equal(result.bodies[0]!.wasTruncated, true)
+})
+
 function candidate(overrides: {
   skipReason?: string | null
   finished?: () => Promise<Error | null>

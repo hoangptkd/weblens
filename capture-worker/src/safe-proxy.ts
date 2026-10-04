@@ -12,8 +12,13 @@ export class SafeProxy {
   })
 
   private port = 0
+  private readonly sockets = new Set<Socket>()
+  private receivedBytes = 0
+  private exhausted = false
+  private closed = false
 
-  constructor() {
+  constructor(private readonly maxBytes = 128 * 1024 * 1024) {
+    this.server.on('connection', (socket) => this.track(socket, false))
     this.server.on('connect', (request, clientSocket, head) => {
       void this.forwardConnect(request.url ?? '', clientSocket, head).catch(() => clientSocket.destroy())
     })
@@ -41,13 +46,35 @@ export class SafeProxy {
   }
 
   async close(): Promise<void> {
+    this.closed = true
+    for (const socket of this.sockets) socket.destroy()
     await new Promise<void>((resolveClose) => this.server.close(() => resolveClose()))
+  }
+
+  assertWithinBudget(): void {
+    if (this.exhausted) throw new Error('CAPTURE_TRANSFER_BUDGET_EXCEEDED')
+  }
+
+  private track(socket: Socket, countBytes: boolean): void {
+    if (this.sockets.has(socket)) return
+    this.sockets.add(socket)
+    socket.once('close', () => this.sockets.delete(socket))
+    socket.setTimeout(10_000, () => socket.destroy())
+    if (countBytes) socket.on('data', (chunk: Buffer) => {
+      this.receivedBytes += chunk.length
+      if (this.receivedBytes > this.maxBytes) {
+        this.exhausted = true
+        for (const active of this.sockets) active.destroy()
+      }
+    })
+    if (this.exhausted || this.closed) socket.destroy()
   }
 
   private async forwardConnect(authority: string, clientSocket: Duplex, head: Buffer): Promise<void> {
     const target = parseAuthority(authority, 443)
     const addresses = await resolvePublicAddresses(target.hostname)
     const upstream = await openSocket(addresses[0] ?? '', target.port)
+    this.track(upstream, true)
     clientSocket.write('HTTP/1.1 200 Connection Established\r\n\r\n')
     if (head.length) upstream.write(head)
     upstream.pipe(clientSocket)
@@ -57,7 +84,9 @@ export class SafeProxy {
       upstream.destroy()
     }
     clientSocket.once('error', close)
+    clientSocket.once('close', close)
     upstream.once('error', close)
+    upstream.once('close', close)
   }
 
   private async forwardHttp(request: IncomingMessage, response: import('node:http').ServerResponse): Promise<void> {
@@ -77,6 +106,7 @@ export class SafeProxy {
       if (!response.headersSent) response.writeHead(502)
       response.end()
     })
+    upstream.on('socket', (socket) => this.track(socket, true))
     request.pipe(upstream)
   }
 
@@ -84,6 +114,10 @@ export class SafeProxy {
     const parsed = await assertPublicHttpUrl(request.url ?? '')
     const addresses = await resolvePublicAddresses(parsed.hostname)
     const upstream = await openSocket(addresses[0] ?? '', parsed.port ? Number(parsed.port) : 80)
+    this.track(upstream, true)
+    clientSocket.once('close', () => upstream.destroy())
+    upstream.once('error', () => clientSocket.destroy())
+    upstream.once('close', () => clientSocket.destroy())
     const startLine = `${request.method ?? 'GET'} ${parsed.pathname}${parsed.search} HTTP/${request.httpVersion}\r\n`
     const headers = Object.entries(request.headers)
       .filter(([name]) => name.toLowerCase() !== 'proxy-connection')
@@ -106,6 +140,7 @@ function parseAuthority(authority: string, defaultPort: number): { hostname: str
 function openSocket(host: string, port: number): Promise<Socket> {
   return new Promise((resolveSocket, reject) => {
     const socket = connect({ host, port })
+    socket.setTimeout(10_000, () => socket.destroy(new Error('PROXY_CONNECT_TIMEOUT')))
     socket.once('connect', () => resolveSocket(socket))
     socket.once('error', reject)
   })

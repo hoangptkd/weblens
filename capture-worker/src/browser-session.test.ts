@@ -1,6 +1,24 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 import { InteractiveBrowserSessionManager, validateBrowserSessionAction } from './browser-session.js'
+import type { BrowserSessionStatus } from './browser-session.js'
+
+test('concurrent starts share one browser launch and preserve ownership', async () => {
+  const manager = new InteractiveBrowserSessionManager()
+  let finish!: (value: BrowserSessionStatus) => void
+  let launches = 0
+  Reflect.set(manager, 'startSession', async () => {
+    launches += 1
+    return new Promise<BrowserSessionStatus>((resolve) => { finish = resolve })
+  })
+  const first = manager.start('owner', 'clone', 'https://example.com/')
+  const second = manager.start('owner', 'clone', 'https://example.com/')
+  await assert.rejects(manager.start('other', 'clone', 'https://example.com/'), /BROWSER_SESSION_NOT_FOUND/u)
+  finish({ status: 'READY', currentUrl: 'https://example.com/', viewportWidth: 1280,
+    viewportHeight: 720, expiresAt: new Date().toISOString() })
+  assert.deepEqual(await first, await second)
+  assert.equal(launches, 1)
+})
 
 test('browser session chỉ nhận thao tác hữu hạn trong viewport', () => {
   assert.deepEqual(validateBrowserSessionAction({ type: 'click', x: 1364, y: 767 }), {

@@ -31,6 +31,7 @@ export class SiteCloneWorker {
     private readonly database: SiteCloneDatabase,
     private readonly storage: ObjectStorage,
     private readonly browserSessions: InteractiveBrowserSessionManager,
+    private readonly render: typeof capturePage = capturePage,
   ) {
     this.crawler = new CrawlerReportClient(config)
   }
@@ -177,6 +178,7 @@ export class SiteCloneWorker {
     }, 15_000)
     let result: Awaited<ReturnType<typeof capturePage>> | null = null
     let uploaded: import('./types.js').StoredObject | null = null
+    let completionAttempted = false
     try {
       const target = work.pageId === work.jobId
         ? fallbackDesignPage(work, work.publicUrl)
@@ -188,7 +190,7 @@ export class SiteCloneWorker {
       const sessionExpected = this.browserSessions.status(work.ownerId, work.jobId) !== null
       const session = await this.browserSessions.waitForReady(work.ownerId, work.jobId, 10 * 60 * 1_000)
       if (sessionExpected && !session) throw new Error('BROWSER_SESSION_NOT_READY')
-      result = await capturePage(captureCommand(work, targetUrl), {
+      result = await this.render(captureCommand(work, targetUrl), {
         mainPath: work.localPath,
         contentAddressedResources: true,
         includeSiteBundle: true,
@@ -217,6 +219,7 @@ export class SiteCloneWorker {
         encoded,
         'application/json',
       )
+      completionAttempted = true
       const accepted = await this.database.completePage(work, uploaded, inputBytes)
       if (!accepted) await this.storage.delete(uploaded)
       log('info', 'site clone page completed', {
@@ -225,7 +228,8 @@ export class SiteCloneWorker {
     } catch (error) {
       log('warn', 'site clone page attempt failed', { ...trace, errorCode: boundedErrorCode(error),
         durationMs: Date.now() - started, retryEligible: work.attemptCount < work.maxRetries })
-      if (uploaded) await this.storage.delete(uploaded).catch(() => undefined)
+      // Preserve objects after an ambiguous COMMIT; database-authoritative GC owns cleanup.
+      if (uploaded && !completionAttempted) await this.storage.delete(uploaded).catch(() => undefined)
       await this.database.failPage(work, boundedErrorCode(error)).catch((databaseError: unknown) => {
         log('warn', 'site clone page failure persistence failed', {
           siteCloneRequestId: work.jobId,
@@ -283,7 +287,7 @@ export class SiteCloneWorker {
         job.payload.maxShardBytes,
         job.payload.maxArchiveBytes,
         async (reference) => {
-          const value = await this.storage.get(reference.bucket, reference.key)
+          const value = await this.storage.get(reference.bucket, reference.key, reference.bytes)
           verifyBytes(value, reference.bytes, reference.sha256Hex)
           return value
         },
@@ -334,7 +338,8 @@ export class SiteCloneWorker {
         shardCount: archiveBuild.parts.length,
       })
     } catch (error) {
-      await Promise.allSettled([...staged, ...uploaded].map((object) => this.storage.delete(object)))
+      // Final objects are registered before copying. GC resolves staged/published references.
+      await Promise.allSettled(staged.map((object) => this.storage.delete(object)))
       await this.database.retryAssembly(job, boundedErrorCode(error)).catch(() => undefined)
       log('warn', 'site clone assembly failed', {
         siteCloneRequestId: job.id,
@@ -407,7 +412,9 @@ export class SiteCloneWorker {
         if (!response.ok) throw new Error(`CONTROL_HTTP_${response.status}`)
         await this.database.completeEvent(event)
       } catch {
-        await this.database.retryEvent(event, 'CONTROL_DELIVERY_FAILED')
+        await this.database.retryEvent(event, 'CONTROL_DELIVERY_FAILED').catch((error: unknown) => {
+          log('error', 'site clone event retry scheduling failed', { messageId: event.messageId, errorType: errorName(error) })
+        })
       }
     }
   }

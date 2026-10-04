@@ -135,17 +135,18 @@ public class CaptureController {
     @GetMapping(value = "/reconstructions/{reconstructionId}/artifacts/archive",
             produces = "application/zip")
     @Operation(summary = "Download one owner-authorized static clone archive")
-    ResponseEntity<byte[]> getReconstructionArchive(
+    ResponseEntity<org.springframework.core.io.Resource> getReconstructionArchive(
             @AuthenticationPrincipal Jwt jwt,
-            @PathVariable UUID reconstructionId
+            @PathVariable UUID reconstructionId,
+            jakarta.servlet.http.HttpServletRequest request
     ) {
         CaptureArtifactContent artifact = captures.getReconstructionArchive(
                 AuthenticatedUserId.from(jwt), reconstructionId
         );
-        byte[] bytes = artifact.bytes();
+        request.setAttribute(ArtifactDownloadFilter.ARTIFACT, artifact);
         ResponseEntity.BodyBuilder response = ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType("application/zip"))
-                .contentLength(bytes.length)
+                .contentLength(artifact.contentLength())
                 .cacheControl(CacheControl.noStore())
                 .header(HttpHeaders.CONTENT_DISPOSITION,
                         ContentDisposition.attachment().filename("weblens-static-clone.zip").build().toString())
@@ -153,6 +154,6 @@ public class CaptureController {
         if (artifact.etag() != null && !artifact.etag().isBlank()) {
             response.eTag(artifact.etag());
         }
-        return response.body(bytes);
+        return response.body(artifact.resource());
     }
 }

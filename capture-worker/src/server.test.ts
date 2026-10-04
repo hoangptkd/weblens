@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, writeFile, rm } from 'node:fs/promises'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { test } from 'node:test'
@@ -80,7 +83,7 @@ test('chỉ trả artifact qua service token, owner scope và kiểm tra integri
     | 'getReconstruction' | 'getReconstructionArchiveReference'
   >
   const analytics = { ping: async () => undefined, listResources: async () => [] }
-  const storage = {
+  const fixtureStorage = {
     get: async (bucket: string, key: string) => {
       assert.equal(bucket, 'captures')
       if (key === 'owner/capture/screenshot.jpg') return screenshot
@@ -88,6 +91,17 @@ test('chỉ trả artifact qua service token, owner scope và kiểm tra integri
       if (key === 'owner/site-clone/archive.zip') return siteArchive
       assert.equal(key, 'owner/capture/resource.bin')
       return corruptResource ? Buffer.from('corrupt', 'utf8') : resource
+    },
+  }
+  const storage = {
+    downloadFile: async (bucket: string, key: string, maximumBytes: number) => {
+      const body = await fixtureStorage.get(bucket, key)
+      if (body.length > maximumBytes) throw new Error('ARTIFACT_SIZE_MISMATCH')
+      const directory = await mkdtemp(join(tmpdir(), 'weblens-server-test-'))
+      const path = join(directory, 'artifact')
+      await writeFile(path, body)
+      return { path, bytes: body.length, sha256Hex: createHash('sha256').update(body).digest('hex'),
+        cleanup: () => rm(directory, { recursive: true, force: true }) }
     },
   }
   const siteDatabase: Pick<SiteCloneDatabase, 'acceptCommand' | 'getReport' | 'getArtifact' | 'getProgress'> = {

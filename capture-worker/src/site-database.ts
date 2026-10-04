@@ -267,6 +267,8 @@ export class SiteCloneDatabase {
     const client = await this.pool.connect()
     try {
       await client.query('begin')
+      // ponytail: serialize short admissions, not rendering; use per-job slots if claim throughput becomes a bottleneck.
+      await client.query("select pg_advisory_xact_lock(hashtextextended('weblens-site-page-admission',0))")
       const reclaimed = await client.query<{ site_reconstruction_job_id: string }>(`with expired as (
           select page.site_reconstruction_job_id,page.page_id,
             page.attempt_count < job.max_retries_per_page as retryable
@@ -617,7 +619,7 @@ export class SiteCloneDatabase {
       [job.id, job.leaseOwner, job.leaseGeneration, phase, exhausted,
         Math.min(30, 2 ** job.attemptCount), boundedCode(code)])
       if (updated.rowCount) {
-        await client.query(`delete from site_reconstruction_artifacts
+        await client.query(`update site_reconstruction_artifacts set delete_after=greatest(clock_timestamp(),created_at+interval '1 microsecond')
           where site_reconstruction_job_id=$1 and generation=$2 and state='STAGED'`,
         [job.id, job.leaseGeneration])
         if (exhausted) await this.enqueueEvent(client, job.id, 'FAILED')
@@ -688,7 +690,7 @@ export class SiteCloneDatabase {
       message_id: string; payload: Record<string, unknown>; lease_owner: string
     }>(`with candidate as (
         select message_id from site_reconstruction_event_outbox
-        where (status='PENDING' and available_at<=now())
+        where (status in ('PENDING','DEAD') and available_at<=now())
           or (status='CLAIMED' and lease_expires_at<=now())
         order by available_at,created_at,message_id for update skip locked limit 1
       ) update site_reconstruction_event_outbox outbox set status='CLAIMED',lease_owner=$1,
@@ -708,7 +710,10 @@ export class SiteCloneDatabase {
   async retryEvent(event: ClaimedSiteEvent, code: string): Promise<void> {
     await this.pool.query(`update site_reconstruction_event_outbox set
       status=case when delivery_attempts>=20 then 'DEAD' else 'PENDING' end,
-      available_at=now()+interval '2 seconds',lease_owner=null,lease_expires_at=null,last_error_code=$3
+      available_at=now()+(case when delivery_attempts>=20 then 300
+        else least(60,power(2,least(delivery_attempts,6))::integer) end
+        + mod(abs(hashtext(message_id::text)::bigint),5)) * interval '1 second',
+      lease_owner=null,lease_expires_at=null,last_error_code=$3
       where message_id=$1 and status='CLAIMED' and lease_owner=$2`,
     [event.messageId, event.leaseOwner, boundedCode(code)])
   }
@@ -806,10 +811,11 @@ export class SiteCloneDatabase {
       storage_key: string; content_type: string; byte_size: string; sha256: Buffer
     }>(`with candidate as (
         select id from site_reconstruction_artifacts
-        where state in ('PUBLISHED','DELETE_PENDING') and delete_after<=now()
+        where state in ('STAGED','PUBLISHED','DELETE_PENDING') and delete_after<=now()
         order by delete_after,id for update skip locked limit 1
       ) update site_reconstruction_artifacts artifact
-      set state='DELETE_PENDING',delete_after=now()+interval '30 seconds'
+      set state=case when artifact.state='STAGED' then 'STAGED' else 'DELETE_PENDING' end,
+          delete_after=now()+interval '30 seconds'
       from candidate where artifact.id=candidate.id
       returning artifact.id,artifact.site_reconstruction_job_id,artifact.storage_bucket,
         artifact.storage_key,artifact.content_type,artifact.byte_size,artifact.sha256`)
@@ -863,7 +869,7 @@ export class SiteCloneDatabase {
       if (deletion.type === 'ARTIFACT') {
         const deleted = await client.query(`update site_reconstruction_artifacts
           set state='DELETED',deleted_at=now()
-          where id=$1 and site_reconstruction_job_id=$2 and state='DELETE_PENDING'`,
+          where id=$1 and site_reconstruction_job_id=$2 and state in ('STAGED','DELETE_PENDING')`,
         [deletion.objectId, deletion.jobId])
         if (!deleted.rowCount) throw new Error('STALE_SITE_GC_CLAIM')
         const remaining = await client.query(`select 1 from site_reconstruction_artifacts
@@ -895,7 +901,7 @@ export class SiteCloneDatabase {
     if (deletion.type === 'ARTIFACT') {
       await this.pool.query(`update site_reconstruction_artifacts
         set delete_after=now()+interval '1 minute'
-        where id=$1 and site_reconstruction_job_id=$2 and state='DELETE_PENDING'`,
+        where id=$1 and site_reconstruction_job_id=$2 and state in ('STAGED','DELETE_PENDING')`,
       [deletion.objectId, deletion.jobId])
       return
     }

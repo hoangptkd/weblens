@@ -9,6 +9,7 @@ public final class ScanStateMachine {
     private static final Map<ScanStatus, Set<ScanStatus>> ALLOWED = Map.of(
             ScanStatus.QUEUED, EnumSet.of(
                     ScanStatus.RUNNING,
+                    ScanStatus.CANCEL_REQUESTED,
                     ScanStatus.COMPLETED,
                     ScanStatus.PARTIAL_SUCCESS,
                     ScanStatus.CANCELLED,

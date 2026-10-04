@@ -61,12 +61,20 @@ func (e *Engine) Run(ctx context.Context) {
 }
 
 func (e *Engine) runDispatcher(ctx context.Context) {
-	// workers là trần số page fetch đồng thời, không phải số vòng polling.
-	// Một dispatcher claim tuần tự để 10.000 slot không tạo connection storm khi
-	// frontier đang rỗng; slot chỉ giữ chỗ trong lúc page thật sự được xử lý.
+	// Fetch capacity and database claim concurrency are separate budgets.
+	// Four claimers share the fetch slots; idle polling remains bounded even
+	// when the fetch ceiling is 10,000.
 	slots := make(chan struct{}, e.workers)
 	var active sync.WaitGroup
 	defer active.Wait()
+	var attempts, empty, claimed int
+	var claimDuration time.Duration
+	nextLog := time.Now().Add(10 * time.Second)
+	type claimResult struct {
+		lease    *model.PageLease
+		err      error
+		duration time.Duration
+	}
 
 	for {
 		if e.backpressured.Load() {
@@ -82,32 +90,57 @@ func (e *Engine) runDispatcher(ctx context.Context) {
 			return
 		}
 
-		lease, err := e.store.ClaimPage(ctx, uuid.New(), e.leaseDuration, e.hostDelay)
-		if err != nil {
-			<-slots
-			if ctx.Err() != nil {
-				return
+		count := 1
+	reserve:
+		for count < min(4, e.workers) {
+			select {
+			case slots <- struct{}{}:
+				count++
+			default:
+				break reserve
 			}
-			e.logger.Error("claim page failed", "error", err)
-			if !waitForContext(ctx, e.pollInterval) {
-				return
-			}
-			continue
 		}
-		if lease == nil {
-			<-slots
-			if !waitForContext(ctx, e.pollInterval) {
-				return
-			}
-			continue
+		results := make(chan claimResult, count)
+		for range count {
+			go func() {
+				started := time.Now()
+				lease, err := e.store.ClaimPage(ctx, uuid.New(), e.leaseDuration, e.hostDelay)
+				results <- claimResult{lease, err, time.Since(started)}
+			}()
 		}
-
-		active.Add(1)
-		go func(pageLease model.PageLease) {
-			defer active.Done()
-			defer func() { <-slots }()
-			e.process(ctx, pageLease)
-		}(*lease)
+		found := false
+		for range count {
+			result := <-results
+			attempts++
+			claimDuration += result.duration
+			if result.err != nil || result.lease == nil {
+				<-slots
+				if result.err != nil && ctx.Err() == nil {
+					e.logger.Error("claim page failed", "error", result.err)
+				} else if result.err == nil {
+					empty++
+				}
+				continue
+			}
+			found = true
+			claimed++
+			active.Add(1)
+			go func(pageLease model.PageLease) {
+				defer active.Done()
+				defer func() { <-slots }()
+				e.process(ctx, pageLease)
+			}(*result.lease)
+		}
+		if time.Now().After(nextLog) {
+			e.logger.Info("crawl dispatch interval", "claims", attempts, "claimed_pages", claimed,
+				"empty_claims", empty, "claim_mean_ms", float64(claimDuration)/float64(time.Millisecond)/float64(attempts),
+				"occupied_slots", len(slots), "fetch_limit", e.workers)
+			attempts, empty, claimed, claimDuration = 0, 0, 0, 0
+			nextLog = time.Now().Add(10 * time.Second)
+		}
+		if !found && !waitForContext(ctx, e.pollInterval) {
+			return
+		}
 	}
 }
 
@@ -182,6 +215,13 @@ func buildResult(lease model.PageLease, fetched FetchResult) model.PageResult {
 			result.FetchOutcome = "FAILED"
 			result.Findings = append(result.Findings, finding(lease.PageID, "fetch.failed", 1, "TECHNICAL", "ERROR", "FETCH_FAILED", "Page fetch failed.", map[string]any{"errorCode": fetched.ErrorCode}))
 		}
+		return result
+	}
+	if fetched.BodyTruncated {
+		result.FetchOutcome = "FAILED"
+		result.ErrorCode = "BODY_TRUNCATED"
+		result.ErrorMessage = "Response exceeded the body limit; complete HTML evidence is unavailable."
+		result.Findings = append(result.Findings, finding(lease.PageID, "fetch.body-truncated", 1, "TECHNICAL", "WARNING", "BODY_TRUNCATED", result.ErrorMessage, map[string]any{"retainedBytes": fetched.BodyBytes}))
 		return result
 	}
 	if fetched.StatusCode >= 400 {

@@ -18,6 +18,8 @@ func TestPageRetryPolicyIsBoundedAndOnlyRetriesTransientFailures(t *testing.T) {
 		{"timeout", model.PageResult{ErrorCode: "timeout"}, 1, true},
 		{"rate limited", model.PageResult{StatusCode: 429}, 2, true},
 		{"server error", model.PageResult{StatusCode: 503}, 1, true},
+		{"not implemented", model.PageResult{StatusCode: 501}, 1, false},
+		{"unsupported HTTP version", model.PageResult{StatusCode: 505}, 1, false},
 		{"unsafe address", model.PageResult{ErrorCode: "ssrf_blocked"}, 1, false},
 		{"client error", model.PageResult{StatusCode: 404}, 1, false},
 		{"attempt budget exhausted", model.PageResult{ErrorCode: "timeout"}, 3, false},

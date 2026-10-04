@@ -27,6 +27,9 @@ import java.util.Optional;
 import java.util.UUID;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 @Transactional(readOnly = true)
@@ -50,6 +53,7 @@ public class CaptureService {
     private final ControlMessagingRepository messages;
     private final Clock clock;
     private final CaptureReportClient captureReports;
+    private final TransactionTemplate write;
 
     public CaptureService(
             CaptureRequestRepository captures,
@@ -59,7 +63,8 @@ public class CaptureService {
             IdempotencyKeyService idempotencyKeys,
             ControlMessagingRepository messages,
             Clock clock,
-            CaptureReportClient captureReports
+            CaptureReportClient captureReports,
+            PlatformTransactionManager transactions
     ) {
         this.captures = captures;
         this.scans = scans;
@@ -69,17 +74,35 @@ public class CaptureService {
         this.messages = messages;
         this.clock = clock;
         this.captureReports = captureReports;
+        this.write = new TransactionTemplate(transactions);
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.NEVER)
     public CreateCaptureResult create(
             UUID ownerId,
             UUID pageId,
             String rawIdempotencyKey,
             UUID correlationId
     ) {
-        currentUsers.lockActive(ownerId);
+        currentUsers.requireActive(ownerId);
+        String keyHash = idempotencyKeys.hashOptional(rawIdempotencyKey);
+        if (keyHash != null) {
+            CaptureRequestEntity existing = captures.findByOwnerIdAndIdempotencyKeyHash(ownerId, keyHash).orElse(null);
+            if (existing != null) {
+                String fingerprint = idempotencyKeys.fingerprint(OPERATION, pageId.toString());
+                if (!Objects.equals(existing.getRequestFingerprintHash(), fingerprint)) {
+                    throw new ConflictException("IDEMPOTENCY_KEY_REUSED", "The idempotency key was used for another capture.");
+                }
+                return new CreateCaptureResult(toResponse(existing), true);
+            }
+        }
         CrawlerPageContract page = crawler.getPage(ownerId, pageId);
+        return write.execute(status -> persistCapture(ownerId, pageId, rawIdempotencyKey, correlationId, page));
+    }
+
+    private CreateCaptureResult persistCapture(UUID ownerId, UUID pageId, String rawIdempotencyKey,
+            UUID correlationId, CrawlerPageContract page) {
+        currentUsers.lockActive(ownerId);
         scans.findByIdAndRequestedByUserId(page.scanId(), ownerId).orElseThrow(CaptureService::notFound);
         if (!"success".equalsIgnoreCase(page.outcome())) {
             throw new ConflictException(
@@ -141,6 +164,7 @@ public class CaptureService {
         ).map(CaptureService::toResponse);
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public CaptureSnapshotResponse getSnapshot(UUID ownerId, UUID captureId) {
         requireReady(ownerId, captureId);
         CaptureSnapshotResponse response = captureReports.getSnapshot(ownerId, captureId);
@@ -150,16 +174,19 @@ public class CaptureService {
         return response;
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public CaptureArtifactContent getScreenshot(UUID ownerId, UUID captureId) {
         requireReady(ownerId, captureId);
         return captureReports.getScreenshot(ownerId, captureId);
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public CaptureArtifactContent getResourceBody(UUID ownerId, UUID captureId, UUID resourceId) {
         requireReady(ownerId, captureId);
         return captureReports.getResourceBody(ownerId, captureId, resourceId);
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public ReconstructionResponse getReconstruction(UUID ownerId, UUID captureId) {
         requireReady(ownerId, captureId);
         ReconstructionResponse response = captureReports.getReconstruction(ownerId, captureId);
@@ -169,6 +196,7 @@ public class CaptureService {
         return response;
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public CaptureArtifactContent getReconstructionArchive(UUID ownerId, UUID reconstructionId) {
         currentUsers.requireActive(ownerId);
         return captureReports.getReconstructionArchive(ownerId, reconstructionId);

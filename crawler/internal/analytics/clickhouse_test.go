@@ -2,21 +2,95 @@ package analytics
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"io"
+	"log/slog"
+	"strings"
 	"testing"
 	"time"
 
 	clickhouseDriver "github.com/ClickHouse/clickhouse-go/v2"
+	"github.com/ClickHouse/clickhouse-go/v2/lib/driver"
 	"github.com/google/uuid"
 	"github.com/weblens-project/weblens-crawler/internal/model"
 )
 
 func TestSecureConnectionRequiresHostAndPort(t *testing.T) {
-	_, err := openConnection(Options{Address: "clickhouse.example", Database: "analytics", Secure: true}, "analytics")
+	_, err := openConnection(Options{Address: "clickhouse.example", Database: "analytics", Secure: true}, "analytics", 7)
 	if err == nil {
 		t.Fatal("secure address without a port was accepted")
+	}
+}
+
+type reportConnectionStub struct {
+	driver.Conn
+	queries, closed int
+	rowsClosed      bool
+	failure         error
+}
+
+func (c *reportConnectionStub) Query(_ context.Context, query string, _ ...any) (driver.Rows, error) {
+	c.queries++
+	return &reportRowsStub{connection: c, remaining: strings.Contains(query, "page_metrics_current")}, nil
+}
+
+func (c *reportConnectionStub) QueryRow(context.Context, string, ...any) driver.Row {
+	c.queries++
+	return &reportRowStub{failure: c.failure}
+}
+
+func (c *reportConnectionStub) Stats() driver.Stats { return driver.Stats{MaxOpenConns: 7} }
+func (c *reportConnectionStub) Close() error        { c.closed++; return c.failure }
+
+type reportRowsStub struct {
+	driver.Rows
+	connection *reportConnectionStub
+	remaining  bool
+}
+
+func (r *reportRowsStub) Next() bool           { result := r.remaining; r.remaining = false; return result }
+func (*reportRowsStub) Scan(dest ...any) error { *dest[0].(*uuid.UUID) = uuid.New(); return nil }
+func (r *reportRowsStub) Close() error         { r.connection.rowsClosed = true; return nil }
+func (r *reportRowsStub) Err() error           { return r.connection.failure }
+
+type reportRowStub struct {
+	driver.Row
+	failure error
+}
+
+func (r *reportRowStub) Scan(...any) error { return r.failure }
+
+func TestReportsUseReadPoolAndReleaseRowsOnFailure(t *testing.T) {
+	for _, failure := range []error{nil, context.DeadlineExceeded} {
+		read, write := &reportConnectionStub{failure: failure}, &reportConnectionStub{}
+		sink := &Sink{connection: write, readConnection: read, readSlots: make(chan struct{}, 1), database: "analytics", logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+		_, _, pageErr := sink.ListPages(context.Background(), uuid.New(), uuid.New(), 10, "", uuid.Nil, model.PageFilters{})
+		_, summaryErr := sink.ScanSummary(context.Background(), uuid.New(), uuid.New())
+		_, detailErr := sink.GetPage(context.Background(), uuid.New(), uuid.New())
+		if read.queries < 3 || write.queries != 0 || !read.rowsClosed {
+			t.Fatalf("report used write pool or leaked rows: read=%d write=%d closed=%v", read.queries, write.queries, read.rowsClosed)
+		}
+		if failure != nil && (!errors.Is(pageErr, failure) || !errors.Is(summaryErr, failure) || !errors.Is(detailErr, failure)) {
+			t.Fatal("report hid a ClickHouse failure")
+		}
+		if err := sink.Close(); !errors.Is(err, failure) || read.closed != 1 || write.closed != 1 {
+			t.Fatalf("pool close did not release both pools: err=%v read=%d write=%d", err, read.closed, write.closed)
+		}
+	}
+}
+
+func TestReportAdmissionDeadlineDoesNotCallClickHouse(t *testing.T) {
+	read := &reportConnectionStub{}
+	sink := &Sink{readConnection: read, readSlots: make(chan struct{}, 1), logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	sink.readSlots <- struct{}{}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err := sink.ScanSummary(ctx, uuid.New(), uuid.New())
+	if !errors.Is(err, context.DeadlineExceeded) || read.queries != 0 || len(sink.readSlots) != 1 {
+		t.Fatalf("admission deadline called ClickHouse or lost another caller's slot: err=%v queries=%d slots=%d", err, read.queries, len(sink.readSlots))
 	}
 }
 

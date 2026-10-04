@@ -25,7 +25,12 @@ func TestPublicAddressPolicy(t *testing.T) {
 		{"2606:4700:4700::1111", true},
 		{"127.0.0.1", false},
 		{"10.0.0.1", false},
+		{"172.16.0.1", false},
+		{"192.168.0.1", false},
 		{"169.254.169.254", false},
+		{"::ffff:127.0.0.1", false},
+		{"fd00::1", false},
+		{"fe80::1", false},
 		{"100.64.0.1", false},
 		{"192.0.2.10", false},
 		{"198.18.0.1", false},
@@ -87,5 +92,18 @@ func TestLocalOnlyDialerRejectsPublicOrMixedDNSAnswersBeforeDial(t *testing.T) {
 				t.Fatalf("expected ErrUnsafeAddress, got %v", err)
 			}
 		})
+	}
+}
+
+func TestPublicDialerRejectsMixedDNSBeforeConnecting(t *testing.T) {
+	addresses := []netip.Addr{netip.MustParseAddr("8.8.8.8"), netip.MustParseAddr("127.0.0.1")}
+	dialer := newSafeDialerWithResolver(staticResolver{addresses: addresses}, false)
+	connection, err := dialer.DialContext(context.Background(), "tcp", "fixture.test:80")
+	if connection != nil {
+		_ = connection.Close()
+		t.Fatal("mixed public/private DNS returned a connection")
+	}
+	if !errors.Is(err, ErrUnsafeAddress) {
+		t.Fatalf("expected ErrUnsafeAddress, got %v", err)
 	}
 }

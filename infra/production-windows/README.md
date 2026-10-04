@@ -1,16 +1,24 @@
 # WebLens Windows-native production
 
-This deployment preserves local Docker Compose but runs production as four
-Windows services. Neon, ClickHouse Cloud, and Cloudflare R2 remain external.
+This deployment preserves local Docker Compose but runs production as five
+Windows services. PostgreSQL runs on the VPS; ClickHouse Cloud and Cloudflare
+R2 remain external.
 
 The release layout is `C:\WebLens\releases\<commit>`, with `C:\WebLens\current`
 pointing to the active release. Secrets live only in
-`C:\ProgramData\WebLens\weblens.env`; grant read access only to the four service
-virtual accounts, Administrators, and SYSTEM.
-When Neon supplies a pooled `DB_URL`, configure `SPRING_FLYWAY_URL` with the
-matching direct (non-`-pooler`) JDBC endpoint and set `SPRING_FLYWAY_USER` and
-`SPRING_FLYWAY_PASSWORD` to the database credentials. Flyway's PostgreSQL
-advisory lock needs one database session; the runtime datasource can remain pooled.
+`C:\ProgramData\WebLens\weblens.env`; grant read access only to the service
+virtual accounts, Administrators, and SYSTEM. `WebLensPostgres` is a dedicated
+PostgreSQL 17 service listening on `127.0.0.1:5433`. The backend, crawler, and
+capture worker use separate databases and login roles, and each Windows service
+depends on `WebLensPostgres` for reboot ordering. Keep the database port bound to
+loopback; do not open it in the VPS firewall.
+
+Production database URLs must use `127.0.0.1:5433` with TLS disabled because the
+traffic never leaves the host. Keep a bounded connect timeout on every client;
+the backend also uses a socket timeout and TCP keepalive. Logical backups belong
+under `C:\ProgramData\WebLens\backups` with access limited to Administrators and
+SYSTEM. Before a PostgreSQL major upgrade, take and validate a custom-format dump
+of all three databases.
 The Capture Worker uses pinned Camoufox by default; its Windows binary is
 checksum-verified and included in each release. Chromium is retained and can
 be selected explicitly with `CAPTURE_BROWSER_ENGINE=playwright`.
@@ -24,7 +32,8 @@ this fix: the Chromium override does not receive the Firefox preference and is
 not a remedy for this service-host crash. The Windows release smoke test probes
 gamepad access and verifies that the browser still accepts login input.
 
-Run `bootstrap.ps1` once after the first release junction exists. It registers
+Install and start `WebLensPostgres` before running `bootstrap.ps1`. Run
+`bootstrap.ps1` once after the first release junction exists. It registers
 `WebLensDeployPoll`, which checks the public GitHub deployment release every five
 minutes, verifies its SHA-256, and calls `deploy.ps1`. The script runs only the
 crawler PostgreSQL migration, health-checks all services, and returns to the

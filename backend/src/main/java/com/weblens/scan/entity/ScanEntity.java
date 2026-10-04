@@ -152,12 +152,9 @@ public class ScanEntity {
         if (status == ScanStatus.CANCEL_REQUESTED || status == ScanStatus.CANCELLED) {
             return false;
         }
-        if (status == ScanStatus.QUEUED) {
-            cancellationRequestedAt = now;
-            transitionTo(ScanStatus.CANCELLED, now);
-            return true;
-        }
-        if (status == ScanStatus.RUNNING) {
+        if (status == ScanStatus.QUEUED || status == ScanStatus.RUNNING) {
+            // QUEUED is a local projection: the crawler may already have completed
+            // while its events are delayed. Only the crawler confirms cancellation.
             transitionTo(ScanStatus.CANCEL_REQUESTED, now);
             cancellationRequestedAt = now;
             return true;

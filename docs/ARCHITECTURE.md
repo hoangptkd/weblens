@@ -20,8 +20,9 @@ Assembly deduplicate lần cuối bằng DOM layout fingerprint, deduplicate ass
 page, rewrite link, tạo archive shard không có screenshot, owner-scoped download,
 cancellation và GC. Capacity production vẫn cần benchmark trên hạ tầng triển khai.
 
-PostgreSQL production dùng Neon và các deployable chạy Windows-native theo
-[ADR-010](adr/ADR-010-windows-native-vps-deployment.md). Kiến trúc ba deployable và cách
+PostgreSQL production dùng PostgreSQL 17 local trên VPS, bind `127.0.0.1:5433`
+theo [ADR-018](adr/ADR-018-local-postgresql-production.md). Các deployable vẫn chạy
+Windows-native theo [ADR-010](adr/ADR-010-windows-native-vps-deployment.md). Kiến trúc ba deployable và cách
 sử dụng CrawlObserver được phê duyệt trong
 [ADR-005](adr/ADR-005-tach-crawler-thanh-microservice.md). ClickHouse analytical
 store được phê duyệt trong
@@ -216,13 +217,43 @@ review riêng; tài liệu này không cấp quyền vượt cổng database RED
 stateDiagram-v2
     [*] --> QUEUED
     QUEUED --> RUNNING
-    QUEUED --> CANCELLED
+    QUEUED --> CANCEL_REQUESTED : yêu cầu hủy
+    QUEUED --> COMPLETED : event terminal đến trước progress
+    QUEUED --> PARTIAL_SUCCESS
+    QUEUED --> CANCELLED : Crawler xác nhận
     QUEUED --> FAILED
+    RUNNING --> CANCEL_REQUESTED : yêu cầu hủy
     RUNNING --> COMPLETED
-    RUNNING --> PARTIAL
+    RUNNING --> PARTIAL_SUCCESS
     RUNNING --> FAILED
-    RUNNING --> CANCELLED
+    RUNNING --> CANCELLED : Crawler xác nhận
+    CANCEL_REQUESTED --> COMPLETED
+    CANCEL_REQUESTED --> PARTIAL_SUCCESS
+    CANCEL_REQUESTED --> FAILED
+    CANCEL_REQUESTED --> CANCELLED : Crawler xác nhận
 ```
+
+`QUEUED` là projection phía Control Plane và có thể trễ so với execution thật.
+Yêu cầu hủy chỉ chuyển scan sang `CANCEL_REQUESTED`; kết quả terminal do Crawler
+xác nhận. Event progress đến muộn không làm mất yêu cầu hủy. Nếu Crawler đã hoàn
+tất trước khi xử lý lệnh hủy, event terminal hoàn tất vẫn được áp dụng theo version.
+Trạng thái terminal đã xác nhận không được mở lại bằng event mới hoặc cũ.
+
+Tối ưu runtime cục bộ ngày 2026-10-03: snapshot progress cùng trạng thái được ghi
+vào durable outbox tối đa một lần/giây/scan khi có hoạt động; đổi trạng thái và
+terminal không chịu giới hạn này. Version vẫn tăng theo workflow, nên event có
+thể nhảy version. Publisher giữ thứ tự event còn pending trong từng scan, gửi
+tối đa bốn scan song song và kiểm tra acknowledgement trước khi ghi DELIVERED.
+Dispatcher có tối đa bốn page claim song song, dùng chung trần fetch; ưu tiên
+execution có ít lease và hoạt động ít gần đây. Đây là phân phối theo hoạt động,
+không phải cam kết round-robin hay tăng throughput đã đo.
+
+Report dùng pool ClickHouse riêng: bảy connection đọc và ba connection ghi,
+giữ tổng trần mười. Admission đọc có deadline và timing riêng; trả slot đọc trước
+khi truy vấn findings. Scan có analytics expected/published đều bằng không từ
+workflow Crawler được trả report rỗng sau kiểm tra owner/filter/cursor. Không dùng
+projection Control Plane để suy ra dữ liệu rỗng. Chi tiết kiểm thử và trạng thái
+chưa triển khai production: [báo cáo tối ưu](testing/PERFORMANCE_RUNTIME_FIX_2026-10-03.md).
 
 Projection có thể trễ trong SLO đã duyệt, nhưng không được vượt giới hạn, double
 count hoặc báo complete khi Crawler chưa commit terminal state. Trạng thái stale

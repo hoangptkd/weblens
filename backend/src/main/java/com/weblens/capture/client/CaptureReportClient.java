@@ -7,9 +7,6 @@ import com.weblens.common.config.CaptureProperties;
 import com.weblens.common.exception.ApiException;
 import com.weblens.common.exception.NotFoundException;
 import java.util.UUID;
-import java.security.MessageDigest;
-import java.security.NoSuchAlgorithmException;
-import java.util.HexFormat;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
@@ -68,8 +65,7 @@ public class CaptureReportClient {
                             .queryParam("ownerId", ownerId)
                             .build(captureId))
                     .header("X-WebLens-Service-Token", properties.serviceToken())
-                    .retrieve()
-                    .toEntity(byte[].class);
+                    .exchange((request, responseBody) -> ArtifactDownload.readSmall(responseBody, MAX_SCREENSHOT_BYTES));
         } catch (RestClientResponseException exception) {
             throw artifactFailure(exception);
         } catch (RestClientException exception) {
@@ -100,8 +96,7 @@ public class CaptureReportClient {
                             .queryParam("ownerId", ownerId)
                             .build(captureId, resourceId))
                     .header("X-WebLens-Service-Token", properties.serviceToken())
-                    .retrieve()
-                    .toEntity(byte[].class);
+                    .exchange((request, responseBody) -> ArtifactDownload.readSmall(responseBody, 10_485_760));
         } catch (RestClientResponseException exception) {
             throw artifactFailure(exception);
         } catch (RestClientException exception) {
@@ -144,43 +139,21 @@ public class CaptureReportClient {
     }
 
     public CaptureArtifactContent getReconstructionArchive(UUID ownerId, UUID reconstructionId) {
-        ResponseEntity<byte[]> response;
         try {
-            response = client.get()
+            return client.get()
                     .uri(uri -> uri.path(
                                     "/internal/v1/reports/reconstructions/{reconstructionId}/artifacts/archive"
                             )
                             .queryParam("ownerId", ownerId)
                             .build(reconstructionId))
                     .header("X-WebLens-Service-Token", properties.serviceToken())
-                    .retrieve()
-                    .toEntity(byte[].class);
+                    .exchange((request, response) -> ArtifactDownload.read(response, MAX_ARCHIVE_BYTES,
+                            "RECONSTRUCTION_ARTIFACT_INTEGRITY_FAILED"));
         } catch (RestClientResponseException exception) {
             throw reconstructionArtifactFailure(exception);
         } catch (RestClientException exception) {
             throw reportUnavailable(exception);
         }
-        byte[] body = response.getBody();
-        if (body == null || body.length == 0 || body.length > MAX_ARCHIVE_BYTES) {
-            throw reportUnavailable();
-        }
-        if (!MediaType.parseMediaType("application/zip").equals(response.getHeaders().getContentType())) {
-            throw reportUnavailable();
-        }
-        String etag = response.getHeaders().getFirst(HttpHeaders.ETAG);
-        if (!matchesSha256Etag(body, etag)) {
-            throw new ApiException(
-                    HttpStatus.SERVICE_UNAVAILABLE,
-                    "RECONSTRUCTION_ARTIFACT_INTEGRITY_FAILED",
-                    "Static clone archive integrity check failed",
-                    "The static clone archive failed its integrity check."
-            );
-        }
-        return new CaptureArtifactContent(
-                body,
-                "application/zip",
-                etag
-        );
     }
 
     private static ApiException artifactFailure(RestClientResponseException exception) {
@@ -259,16 +232,4 @@ public class CaptureReportClient {
         return exception.getResponseBodyAsString().contains("\"code\":\"" + code + "\"");
     }
 
-    private static boolean matchesSha256Etag(byte[] body, String etag) {
-        if (etag == null || !etag.matches("\"sha256-[0-9a-f]{64}\"")) {
-            return false;
-        }
-        try {
-            byte[] expected = HexFormat.of().parseHex(etag.substring(8, 72));
-            byte[] actual = MessageDigest.getInstance("SHA-256").digest(body);
-            return MessageDigest.isEqual(actual, expected);
-        } catch (IllegalArgumentException | NoSuchAlgorithmException exception) {
-            return false;
-        }
-    }
 }

@@ -71,17 +71,30 @@ export class CaptureDatabase {
     try {
       await client.query('select pg_advisory_lock(hashtextextended($1, 0))', ['weblens-capture-migrations'])
       await client.query(`create table if not exists capture_schema_migrations (
-        version text primary key, applied_at timestamptz not null default now())`)
+        version text primary key, applied_at timestamptz not null default now(), checksum text)`)
+      await client.query('alter table capture_schema_migrations add column if not exists checksum text')
       const files = (await readdir(directory)).filter((file) => file.endsWith('.sql')).sort()
+      const missing = await client.query<{ version: string }>(
+        'select version from capture_schema_migrations where not (version=any($1::text[]))', [files])
+      if (missing.rowCount) throw new Error(`MIGRATION_FILE_MISSING:${missing.rows[0]!.version}`)
       for (const file of files) {
-        const exists = await client.query<{ exists: boolean }>(
-          'select exists(select 1 from capture_schema_migrations where version = $1) as exists', [file],
-        )
-        if (exists.rows[0]?.exists) continue
+        const script = await readFile(resolve(directory, file), 'utf8')
+        const checksum = createHash('sha256').update(script).digest('hex')
+        const applied = await client.query<{ checksum: string | null }>(
+          'select checksum from capture_schema_migrations where version=$1', [file])
+        if (applied.rowCount) {
+          if (applied.rows[0]!.checksum === null) {
+            // Legacy versions have no historical checksum. Deployment verifies them against the previous release first.
+            await client.query('update capture_schema_migrations set checksum=$2 where version=$1', [file, checksum])
+          } else if (applied.rows[0]!.checksum !== checksum) {
+            throw new Error(`MIGRATION_CHECKSUM_MISMATCH:${file}`)
+          }
+          continue
+        }
         await client.query('begin')
         try {
-          await client.query(await readFile(resolve(directory, file), 'utf8'))
-          await client.query('insert into capture_schema_migrations(version) values ($1) on conflict do nothing', [file])
+          await client.query(script)
+          await client.query('insert into capture_schema_migrations(version,checksum) values ($1,$2)', [file, checksum])
           await client.query('commit')
         } catch (error) {
           await client.query('rollback')
@@ -146,6 +159,23 @@ export class CaptureDatabase {
     const client = await this.pool.connect()
     try {
       await client.query('begin')
+      const exhausted = await client.query<{
+        id: string; owner_id: string; correlation_id: string
+      }>(`with expired as (
+          select id from capture_jobs where status='RENDERING'
+            and lease_expires_at<=now() and attempt_count>=3
+          order by lease_expires_at,id for update skip locked limit 100
+        ) update capture_jobs job set status='FAILED',lease_owner=null,lease_expires_at=null,
+          terminal_code='CAPTURE_RETRIES_EXHAUSTED',
+          terminal_message='Capture lease expired after bounded retries',finished_at=now(),updated_at=now()
+        from expired where job.id=expired.id returning job.id,job.owner_id,job.correlation_id`)
+      for (const expired of exhausted.rows) {
+        await client.query(`update reconstruction_jobs set status='FAILED',
+          failure_code='CAPTURE_FAILED_BEFORE_CLONE',finished_at=now(),updated_at=now(),version=version+1
+          where capture_job_id=$1 and status in ('QUEUED','RUNNING')`, [expired.id])
+        await this.enqueueEvent(client, expired.id, expired.owner_id, expired.correlation_id,
+          'FAILED', 0, 0, 0, 0, 'CAPTURE_RETRIES_EXHAUSTED', 'Capture lease expired after bounded retries')
+      }
       await client.query(`update capture_jobs set status='QUEUED', lease_owner=null, lease_expires_at=null,
           available_at=now(), updated_at=now()
         where status='RENDERING' and lease_expires_at <= now() and attempt_count < 3`)
@@ -418,7 +448,7 @@ export class CaptureDatabase {
       payload_sha256: Buffer; lease_owner: string
     }>(`with candidate as (
         select id from analytics_outbox
-        where (status='PENDING' and available_at<=now()) or (status='CLAIMED' and lease_expires_at<=now())
+        where (status in ('PENDING','DEAD') and available_at<=now()) or (status='CLAIMED' and lease_expires_at<=now())
         order by available_at,created_at,id for update skip locked limit 1
       ) update analytics_outbox outbox set status='CLAIMED',lease_owner=$1,
         lease_expires_at=now()+interval '30 seconds',delivery_attempts=delivery_attempts+1,updated_at=now()
@@ -464,7 +494,10 @@ export class CaptureDatabase {
 
   async retryAnalytics(outbox: ClaimedOutbox, code: string): Promise<void> {
     await this.pool.query(`update analytics_outbox set status=case when delivery_attempts>=20 then 'DEAD' else 'PENDING' end,
-      available_at=now()+interval '2 seconds',lease_owner=null,lease_expires_at=null,last_error_code=$3,updated_at=now()
+      available_at=now()+(case when delivery_attempts>=20 then 300
+        else least(60,power(2,least(delivery_attempts,6))::integer) end
+        + mod(abs(hashtext(id::text)::bigint),5)) * interval '1 second',
+      lease_owner=null,lease_expires_at=null,last_error_code=$3,updated_at=now()
       where id=$1 and status='CLAIMED' and lease_owner=$2`, [outbox.id, outbox.leaseOwner, code])
   }
 
@@ -473,7 +506,7 @@ export class CaptureDatabase {
       message_id: string; payload: Record<string, unknown>; lease_owner: string
     }>(`with candidate as (
         select message_id from event_outbox
-        where (status='PENDING' and available_at<=now()) or (status='CLAIMED' and lease_expires_at<=now())
+        where (status in ('PENDING','DEAD') and available_at<=now()) or (status='CLAIMED' and lease_expires_at<=now())
         order by available_at,created_at,message_id for update skip locked limit 1
       ) update event_outbox outbox set status='CLAIMED',lease_owner=$1,
         lease_expires_at=now()+interval '30 seconds',delivery_attempts=delivery_attempts+1
@@ -491,7 +524,10 @@ export class CaptureDatabase {
 
   async retryEvent(event: ClaimedEvent, code: string): Promise<void> {
     await this.pool.query(`update event_outbox set status=case when delivery_attempts>=20 then 'DEAD' else 'PENDING' end,
-      available_at=now()+interval '2 seconds',lease_owner=null,lease_expires_at=null,last_error_code=$3
+      available_at=now()+(case when delivery_attempts>=20 then 300
+        else least(60,power(2,least(delivery_attempts,6))::integer) end
+        + mod(abs(hashtext(message_id::text)::bigint),5)) * interval '1 second',
+      lease_owner=null,lease_expires_at=null,last_error_code=$3
       where message_id=$1 and status='CLAIMED' and lease_owner=$2`, [event.messageId, event.leaseOwner, code])
   }
 

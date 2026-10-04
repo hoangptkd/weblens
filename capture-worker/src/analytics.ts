@@ -68,7 +68,8 @@ export class CaptureAnalytics {
   }
 
   async ping(): Promise<void> {
-    await this.client.ping()
+    const result = await this.client.ping()
+    if (!result.success) throw new Error('CLICKHOUSE_UNAVAILABLE', { cause: result.error })
   }
 
   async write(outbox: ClaimedOutbox): Promise<void> {

@@ -28,7 +28,8 @@ class SiteCloneControllerTest {
         var response = controller.getArtifact(
                 Jwt.withTokenValue("test").header("alg", "none").subject(ownerId.toString()).build(),
                 siteCloneId,
-                artifactId
+                artifactId,
+                new org.springframework.mock.web.MockHttpServletRequest()
         );
 
         assertThat(response.getHeaders().getFirst(HttpHeaders.CONTENT_DISPOSITION))

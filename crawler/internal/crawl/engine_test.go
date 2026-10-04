@@ -2,8 +2,11 @@ package crawl
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -47,8 +50,70 @@ func TestHighWorkerLimitDoesNotMultiplyIdleDatabasePolling(t *testing.T) {
 	engine.Run(ctx)
 
 	claims := store.claimCount.Load()
-	if claims < 2 || claims > 10 {
+	if claims < 2 || claims > 40 {
 		t.Fatalf("idle dispatcher made %d claims; expected polling independent from 10000 worker slots", claims)
+	}
+}
+
+type boundedPageStore struct {
+	idlePageStore
+	url         string
+	claimActive atomic.Int32
+	claimPeak   atomic.Int32
+	commits     atomic.Int32
+	fetchActive atomic.Int32
+	fetchPeak   atomic.Int32
+}
+
+func (s *boundedPageStore) ClaimPage(ctx context.Context, owner uuid.UUID, _ time.Duration, _ time.Duration) (*model.PageLease, error) {
+	active := s.claimActive.Add(1)
+	defer s.claimActive.Add(-1)
+	for peak := s.claimPeak.Load(); active > peak; peak = s.claimPeak.Load() {
+		if s.claimPeak.CompareAndSwap(peak, active) {
+			break
+		}
+	}
+	if !waitForContext(ctx, 10*time.Millisecond) {
+		return nil, ctx.Err()
+	}
+	return &model.PageLease{PageID: uuid.New(), LeaseOwner: owner, NormalizedURL: s.url,
+		Hostname: "127.0.0.1", AcceptedAt: time.Now(), MaxDuration: time.Minute, MaxResponseBytes: 1024}, nil
+}
+
+func (s *boundedPageStore) CommitPageResult(_ context.Context, _ model.PageLease, _ model.PageResult) error {
+	s.commits.Add(1)
+	return nil
+}
+
+func TestDispatcherBoundsClaimsAndFetchesAndWaitsForShutdown(t *testing.T) {
+	for _, workers := range []int{1, 2, 8} {
+		t.Run(fmt.Sprint(workers), func(t *testing.T) {
+			store := &boundedPageStore{}
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				active := store.fetchActive.Add(1)
+				defer store.fetchActive.Add(-1)
+				for peak := store.fetchPeak.Load(); active > peak; peak = store.fetchPeak.Load() {
+					if store.fetchPeak.CompareAndSwap(peak, active) {
+						break
+					}
+				}
+				waitForContext(r.Context(), 30*time.Millisecond)
+				_, _ = io.WriteString(w, "page")
+			}))
+			defer server.Close()
+			store.url = server.URL
+			fetcher := &Fetcher{client: server.Client(), userAgent: "test"}
+			engine := NewEngine(store, fetcher, workers, time.Millisecond, time.Second, 0, time.Minute, slog.New(slog.NewTextHandler(io.Discard, nil)))
+			ctx, cancel := context.WithTimeout(context.Background(), 180*time.Millisecond)
+			defer cancel()
+			engine.Run(ctx)
+			if store.claimPeak.Load() > int32(min(4, workers)) || store.fetchPeak.Load() > int32(workers) || store.commits.Load() == 0 || store.claimActive.Load() != 0 {
+				t.Fatalf("invalid dispatch limits or shutdown: claimPeak=%d fetchPeak=%d commits=%d claimsActive=%d", store.claimPeak.Load(), store.fetchPeak.Load(), store.commits.Load(), store.claimActive.Load())
+			}
+			if workers >= 2 && store.claimPeak.Load() < 2 {
+				t.Fatal("claims still serialized")
+			}
+		})
 	}
 }
 
@@ -60,6 +125,16 @@ func TestBuildResultDoesNotAddContentFindingsToHTTPErrorPage(t *testing.T) {
 	})
 	if result.FetchOutcome != "HTTP_ERROR" || len(result.Findings) != 1 || result.Findings[0].Code != "HTTP_ERROR" {
 		t.Fatalf("unexpected HTTP error findings: outcome=%s findings=%#v", result.FetchOutcome, result.Findings)
+	}
+}
+
+func TestTruncatedHTMLDoesNotProduceCompleteContentFindings(t *testing.T) {
+	result := buildResult(model.PageLease{PageID: uuid.New()}, FetchResult{
+		FinalURL: "https://example.com/", StatusCode: 200, ContentType: "text/html",
+		Body: []byte("<html><head>"), BodyBytes: 12, BodyTruncated: true,
+	})
+	if result.FetchOutcome != "FAILED" || result.ErrorCode != "BODY_TRUNCATED" || len(result.Findings) != 1 || result.Findings[0].Code != "BODY_TRUNCATED" || len(result.Links) != 0 || result.IsIndexable {
+		t.Fatalf("truncated evidence reported as complete: %#v", result)
 	}
 }
 

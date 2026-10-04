@@ -31,6 +31,8 @@ import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Validated
 @RestController
@@ -38,6 +40,8 @@ import org.springframework.web.bind.annotation.RestController;
 @Tag(name = "Scans")
 @SecurityRequirement(name = OpenApiConfig.BEARER_SCHEME)
 public class ScanController {
+
+    private static final Logger ADMISSION_TIMING = LoggerFactory.getLogger("com.weblens.scan.admission");
 
     private final ScanService scans;
 
@@ -53,12 +57,23 @@ public class ScanController {
             @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
             HttpServletRequest request
     ) {
-        ScanService.CreateScanResult result = scans.create(
-                AuthenticatedUserId.from(jwt),
-                websiteId,
-				idempotencyKey,
-				CorrelationIdFilter.getCorrelationUuid(request)
-        );
+        UUID correlationId = CorrelationIdFilter.getCorrelationUuid(request);
+        boolean timing = ADMISSION_TIMING.isDebugEnabled();
+        long started = timing ? System.nanoTime() : 0;
+        ScanService.CreateScanResult result;
+        try {
+            result = scans.create(
+                    AuthenticatedUserId.from(jwt),
+                    websiteId,
+                    idempotencyKey,
+                    correlationId
+            );
+        } finally {
+            if (timing) {
+                ADMISSION_TIMING.debug("scan_admission_call correlationId={} callMs={}",
+                        correlationId, (System.nanoTime() - started) / 1_000_000.0);
+            }
+        }
         URI location = URI.create("/api/v1/scans/" + result.response().id());
         return ResponseEntity.status(result.replayed() ? HttpStatus.OK : HttpStatus.ACCEPTED)
                 .location(location)

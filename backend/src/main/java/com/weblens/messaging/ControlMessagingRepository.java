@@ -63,7 +63,7 @@ public class ControlMessagingRepository {
                     from outbox_events
                     where aggregate_type = 'SCAN'
                       and event_type in ('SCAN_REQUESTED', 'SCAN_CANCEL_REQUESTED')
-                      and ((status = 'PENDING' and available_at <= :now)
+                      and ((status in ('PENDING', 'DEAD') and available_at <= :now)
                            or (status = 'CLAIMED' and lease_expires_at <= :now))
                     order by available_at, created_at, message_id
                     for update skip locked
@@ -108,7 +108,7 @@ public class ControlMessagingRepository {
                     from outbox_events
                     where aggregate_type = 'CAPTURE'
                       and event_type = 'CAPTURE_REQUESTED'
-                      and ((status = 'PENDING' and available_at <= :now)
+                      and ((status in ('PENDING', 'DEAD') and available_at <= :now)
                            or (status = 'CLAIMED' and lease_expires_at <= :now))
                     order by available_at, created_at, message_id
                     for update skip locked
@@ -153,7 +153,7 @@ public class ControlMessagingRepository {
                     from outbox_events
                     where aggregate_type = 'SITE_CLONE'
                       and event_type in ('SITE_CLONE_REQUESTED', 'SITE_CLONE_CANCEL_REQUESTED')
-                      and ((status = 'PENDING' and available_at <= :now)
+                      and ((status in ('PENDING', 'DEAD') and available_at <= :now)
                            or (status = 'CLAIMED' and lease_expires_at <= :now))
                     order by available_at, created_at, message_id
                     for update skip locked
@@ -329,7 +329,7 @@ public class ControlMessagingRepository {
 		long baseMillis = (1L << exponent) * 1_000L;
 		long jitterRange = baseMillis / 2;
 		long jitter = Math.floorMod(messageId.getLeastSignificantBits(), jitterRange + 1);
-		return Duration.ofMillis(baseMillis / 2 + jitter);
+		return Duration.ofMillis(baseMillis / 2 + jitter).plus(attempt >= 20 ? Duration.ofMinutes(5) : Duration.ZERO);
     }
 
     private static String boundedCode(String value) {

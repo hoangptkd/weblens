@@ -1,5 +1,7 @@
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createServer, STATUS_CODES, type IncomingMessage, type ServerResponse } from 'node:http'
+import { createReadStream } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
 import type { CaptureAnalytics, CaptureResourceRecord } from './analytics.js'
 import type { Config } from './config.js'
 import type { CaptureDatabase, ScreenshotReference } from './database.js'
@@ -21,11 +23,27 @@ export function startServer(
   config: Config,
   database: CaptureServerDatabase,
   analytics: CaptureServerAnalytics,
-  storage: Pick<ObjectStorage, 'get'>,
+  storage: Pick<ObjectStorage, 'downloadFile'>,
   siteDatabase?: Pick<SiteCloneDatabase, 'acceptCommand' | 'getReport' | 'getArtifact' | 'getProgress'>,
   browserSessions?: Pick<InteractiveBrowserSessionManager, 'start' | 'status' | 'screenshot' | 'act' | 'ready' | 'close'>,
 ) {
+  let downloads = 0
+  async function artifact(response: ServerResponse, reference: ScreenshotReference, contentType: string, disposition: string) {
+    const file = await storage.downloadFile(reference.bucket, reference.key, reference.bytes)
+    try {
+      if (file.bytes !== reference.bytes) throw new Error('ARTIFACT_SIZE_MISMATCH')
+      if (file.sha256Hex !== reference.sha256Hex) throw new Error('ARTIFACT_HASH_MISMATCH')
+      response.setHeader('Content-Type', contentType)
+      response.setHeader('Content-Length', file.bytes)
+      response.setHeader('Content-Disposition', disposition)
+      response.setHeader('Cache-Control', 'no-store')
+      response.setHeader('X-Content-Type-Options', 'nosniff')
+      response.setHeader('ETag', `"sha256-${reference.sha256Hex}"`)
+      await pipeline(createReadStream(file.path), response)
+    } finally { await file.cleanup() }
+  }
   return createServer(async (request, response) => {
+    response.setTimeout(120_000, () => response.destroy())
     setHeaders(request, response)
     try {
       const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
@@ -35,6 +53,17 @@ export function startServer(
         return json(response, 200, { status: 'UP' })
       }
       if (!authenticated(request, config.serviceToken)) return problem(request, response, 401, 'SERVICE_AUTHENTICATION_REQUIRED')
+      if (request.method === 'GET' && (url.pathname.includes('/artifacts/') || url.pathname.endsWith('/content'))) {
+        if (downloads >= 2) {
+          response.setHeader('Retry-After', '2')
+          return problem(request, response, 503, 'ARTIFACT_DOWNLOAD_CAPACITY')
+        }
+        downloads += 1
+        let released = false
+        const release = () => { if (!released) { released = true; downloads -= 1 } }
+        response.once('finish', release)
+        response.once('close', release)
+      }
       if (request.method === 'POST' && url.pathname === '/internal/v1/commands/captures') {
         const envelope = parseEnvelope(await readBody(request))
         const duplicate = await database.acceptCommand(envelope)
@@ -96,12 +125,9 @@ export function startServer(
         if (!reference) return problem(request, response, 404, 'SITE_CLONE_ARTIFACT_NOT_FOUND')
         if (reference.state !== 'PUBLISHED') throw new Error('ARTIFACT_EXPIRED')
         ensureNotExpired(reference)
-        const artifact = verifyArtifact(await storage.get(reference.bucket, reference.key), reference)
-        return binary(
+        return await artifact(
           response,
-          200,
-          artifact,
-          reference.sha256Hex,
+          reference,
           reference.contentType,
           `attachment; filename="${safeFilename(siteArtifactFilename(reference))}"`,
         )
@@ -133,8 +159,7 @@ export function startServer(
         const reference = await database.getScreenshotReference(ownerId, screenshotMatch[1])
         if (!reference) return problem(request, response, 404, 'CAPTURE_ARTIFACT_NOT_FOUND')
         ensureNotExpired(reference)
-        const artifact = verifyArtifact(await storage.get(reference.bucket, reference.key), reference)
-        return binary(response, 200, artifact, reference.sha256Hex, 'image/jpeg', 'inline; filename="capture.jpg"')
+        return await artifact(response, reference, 'image/jpeg', 'inline; filename="capture.jpg"')
       }
       const resourceMatch = /^\/internal\/v1\/reports\/captures\/([0-9a-f-]+)\/resources\/([0-9a-f-]+)\/content$/u.exec(url.pathname)
       if (request.method === 'GET' && resourceMatch?.[1] && resourceMatch[2]) {
@@ -142,12 +167,9 @@ export function startServer(
         const reference = await database.getResourceReference(ownerId, resourceMatch[1], resourceMatch[2])
         if (!reference) return problem(request, response, 404, 'CAPTURE_RESOURCE_NOT_FOUND')
         ensureNotExpired(reference)
-        const artifact = verifyArtifact(await storage.get(reference.bucket, reference.key), reference)
-        return binary(
+        return await artifact(
           response,
-          200,
-          artifact,
-          reference.sha256Hex,
+          reference,
           'application/octet-stream',
           'attachment; filename="captured-resource.bin"',
         )
@@ -166,12 +188,9 @@ export function startServer(
         if (!reference) return problem(request, response, 404, 'RECONSTRUCTION_ARTIFACT_NOT_FOUND')
         if (reference.state !== 'PUBLISHED') throw new Error('ARTIFACT_EXPIRED')
         ensureNotExpired(reference)
-        const artifact = verifyArtifact(await storage.get(reference.bucket, reference.key), reference)
-        return binary(
+        return await artifact(
           response,
-          200,
-          artifact,
-          reference.sha256Hex,
+          reference,
           'application/zip',
           'attachment; filename="weblens-static-clone.zip"',
         )
@@ -186,6 +205,7 @@ export function startServer(
       }
       return problem(request, response, 404, 'NOT_FOUND')
     } catch (error) {
+      if (response.headersSent || response.destroyed) { response.destroy(); return }
       const code = error instanceof Error ? error.message : 'INTERNAL_ERROR'
       if (code === 'MESSAGE_ID_COLLISION') return problem(request, response, 409, code)
       if (code.startsWith('INVALID_')) return problem(request, response, 400, code)
@@ -396,15 +416,6 @@ function json(response: ServerResponse, status: number, value: unknown): void {
 
 function ensureNotExpired(reference: ScreenshotReference): void {
   if (reference.expiresAt.getTime() <= Date.now()) throw new Error('ARTIFACT_EXPIRED')
-}
-
-function verifyArtifact(value: Buffer, reference: ScreenshotReference): Buffer {
-  if (value.length !== reference.bytes) throw new Error('ARTIFACT_SIZE_MISMATCH')
-  if (!/^[0-9a-f]{64}$/u.test(reference.sha256Hex)) throw new Error('ARTIFACT_HASH_MISMATCH')
-  const actual = createHash('sha256').update(value).digest()
-  const expected = Buffer.from(reference.sha256Hex, 'hex')
-  if (!timingSafeEqual(actual, expected)) throw new Error('ARTIFACT_HASH_MISMATCH')
-  return value
 }
 
 function binary(

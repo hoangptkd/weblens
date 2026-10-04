@@ -11,6 +11,7 @@ const windowsBrowserEnvironmentNames = ['SystemRoot', 'WINDIR', 'TEMP', 'TMP', '
 export type BrowserEngine = 'playwright' | 'camoufox'
 
 interface BrowserLaunchSettings {
+  timeoutMillis?: number
   engine?: BrowserEngine
   headless: boolean
   stealth: boolean
@@ -91,10 +92,13 @@ export async function launchCaptureBrowser(
       handleSIGHUP: false,
       handleSIGINT: false,
       handleSIGTERM: false,
+      timeout: settings.timeoutMillis ?? 30_000,
     }) as Browser
   }
   if (settings.engine && settings.engine !== 'playwright') throw new Error('INVALID_CAPTURE_BROWSER_ENGINE')
-  const options: LaunchOptions = { headless: settings.headless, proxy: { server: proxyUrl } }
+  const options: LaunchOptions = { headless: settings.headless, proxy: { server: proxyUrl },
+    timeout: settings.timeoutMillis ?? 30_000, env: camoufoxEnvironment(),
+    handleSIGINT: false, handleSIGTERM: false, handleSIGHUP: false }
   if (!settings.stealth) return chromium.launch(options)
 
   // Independent plugin state per browser: concurrent launches must not share mutable hooks.

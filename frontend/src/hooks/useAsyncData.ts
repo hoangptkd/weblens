@@ -12,7 +12,8 @@ interface KeyedAsyncState<T> extends AsyncState<T> {
 }
 
 interface AsyncDataOptions<T> {
-  pollIntervalMs?: number
+  pollIntervalMs?: number | ((data: T | null) => number)
+  enabled?: boolean
   shouldPoll?: (data: T) => boolean
   shouldPollOnError?: () => boolean
 }
@@ -26,15 +27,29 @@ export function useAsyncData<T>(
   const load = useEffectEvent(loader)
   const shouldPoll = useEffectEvent((data: T) => options.shouldPoll?.(data) ?? false)
   const shouldPollOnError = useEffectEvent(() => options.shouldPollOnError?.() ?? true)
-  const pollIntervalMs = options.pollIntervalMs
+  const pollInterval = useEffectEvent((data: T | null) => typeof options.pollIntervalMs === 'function'
+    ? options.pollIntervalMs(data)
+    : options.pollIntervalMs)
+  const enabled = options.enabled ?? true
+  const pollingEnabled = options.pollIntervalMs !== undefined
+  const fixedInterval = typeof options.pollIntervalMs === 'number' ? options.pollIntervalMs : undefined
 
   useEffect(() => {
     let active = true
     let timer: number | undefined
     let latestData: T | null = null
 
+    function schedule() {
+      const interval = pollInterval(latestData)
+      if (active && interval && interval > 0) timer = window.setTimeout(run, interval)
+    }
+
     async function run() {
       if (!active) return
+      if (pollingEnabled && document.visibilityState === 'hidden') {
+        schedule()
+        return
+      }
       if (latestData !== null) {
         setState((current) => ({ ...current, refreshing: current.key === dependencyKey && current.data !== null }))
       }
@@ -52,17 +67,15 @@ export function useAsyncData<T>(
       }
 
       const keepPolling = latestData === null ? shouldPollOnError() : shouldPoll(latestData)
-      if (active && pollIntervalMs && keepPolling) {
-        timer = window.setTimeout(run, pollIntervalMs)
-      }
+      if (keepPolling) schedule()
     }
 
-    void run()
+    if (enabled) void run()
     return () => {
       active = false
       if (timer !== undefined) window.clearTimeout(timer)
     }
-  }, [dependencyKey, pollIntervalMs])
+  }, [dependencyKey, fixedInterval, pollingEnabled, enabled])
 
   if (state.key !== dependencyKey) {
     return { data: null, error: null, loading: true, refreshing: false }

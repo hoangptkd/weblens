@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useEffectEvent, useRef, useState } from 'react'
 import type { FormEvent, MouseEvent } from 'react'
 import { ApiError } from '../api/apiClient'
 import { webLensService } from '../api/webLensApiService'
@@ -16,10 +16,28 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const screenshotRef = useRef<string | null>(null)
+  const mounted = useRef(false)
+  const generation = useRef(0)
+  const refreshSequence = useRef(0)
+  const refreshing = useRef(false)
+  const acting = useRef(false)
+  const pollRefresh = useEffectEvent(() => refresh())
 
-  useEffect(() => () => {
-    if (screenshotRef.current) URL.revokeObjectURL(screenshotRef.current)
-  }, [])
+  useEffect(() => {
+    mounted.current = true
+    generation.current += 1
+    refreshSequence.current += 1
+    refreshing.current = false
+    acting.current = false
+    setBusy(false)
+    clearSession()
+    return () => {
+      mounted.current = false
+      generation.current += 1
+      if (screenshotRef.current) URL.revokeObjectURL(screenshotRef.current)
+      screenshotRef.current = null
+    }
+  }, [siteCloneId])
 
   useEffect(() => {
     if (!autoStart) return
@@ -30,8 +48,14 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
 
   useEffect(() => {
     if (!session || session.status === 'READY') return
-    const timer = window.setInterval(() => { void refresh() }, 1_500)
-    return () => window.clearInterval(timer)
+    let active = true
+    let timer: number | undefined
+    async function poll() {
+      await pollRefresh()
+      if (active) timer = window.setTimeout(poll, 1_500)
+    }
+    timer = window.setTimeout(poll, 1_500)
+    return () => { active = false; window.clearTimeout(timer) }
     // Polling follows the session lifecycle, not every screenshot URL change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [session?.status, siteCloneId])
@@ -45,24 +69,21 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
   }
 
   async function start() {
-    setBusy(true)
-    setError(null)
-    try {
-      setSession(await webLensService.startSiteCloneBrowserSession(siteCloneId))
-      await refresh()
-    } catch (requestError) {
-      setError(message(requestError, 'Không thể mở phiên trình duyệt đăng nhập.'))
-    } finally {
-      setBusy(false)
-    }
+    await changeSession(() => webLensService.startSiteCloneBrowserSession(siteCloneId),
+      'Không thể mở phiên trình duyệt đăng nhập.', true)
   }
 
-  async function refresh() {
+  async function refresh(force = false) {
+    if (!mounted.current || (!force && (acting.current || refreshing.current))) return
+    const currentGeneration = generation.current
+    const sequence = ++refreshSequence.current
+    refreshing.current = true
     try {
       const [nextSession, screenshot] = await Promise.all([
         webLensService.getSiteCloneBrowserSession(siteCloneId),
         webLensService.getSiteCloneBrowserScreenshot(siteCloneId),
       ])
+      if (!mounted.current || currentGeneration !== generation.current || sequence !== refreshSequence.current) return
       const nextUrl = URL.createObjectURL(screenshot)
       if (screenshotRef.current) URL.revokeObjectURL(screenshotRef.current)
       screenshotRef.current = nextUrl
@@ -70,22 +91,40 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
       setSession(nextSession)
       setError(null)
     } catch (requestError) {
+      if (!mounted.current || currentGeneration !== generation.current || sequence !== refreshSequence.current) return
       if (sessionUnavailable(requestError)) clearSession()
       setError(message(requestError, 'Không cập nhật được phiên trình duyệt.'))
+    } finally {
+      if (sequence === refreshSequence.current) refreshing.current = false
     }
   }
 
   async function send(action: SiteCloneBrowserAction) {
+    await changeSession(() => webLensService.sendSiteCloneBrowserAction(siteCloneId, action),
+      'Không gửi được thao tác tới trình duyệt.', true)
+  }
+
+  async function changeSession(action: () => Promise<SiteCloneBrowserSession | null>, fallback: string, reload = false) {
+    if (acting.current) return
+    acting.current = true
+    const currentGeneration = ++generation.current
     setBusy(true)
     setError(null)
     try {
-      setSession(await webLensService.sendSiteCloneBrowserAction(siteCloneId, action))
-      await refresh()
+      const next = await action()
+      if (!mounted.current || currentGeneration !== generation.current) return
+      if (next) setSession(next)
+      else clearSession()
+      if (reload) await refresh(true)
     } catch (requestError) {
+      if (!mounted.current || currentGeneration !== generation.current) return
       if (sessionUnavailable(requestError)) clearSession()
-      setError(message(requestError, 'Không gửi được thao tác tới trình duyệt.'))
+      setError(message(requestError, fallback))
     } finally {
-      setBusy(false)
+      if (mounted.current && currentGeneration === generation.current) {
+        acting.current = false
+        setBusy(false)
+      }
     }
   }
 
@@ -106,29 +145,14 @@ export function ManagedBrowserPanel({ siteCloneId, autoStart }: Props) {
   }
 
   async function ready() {
-    setBusy(true)
-    setError(null)
-    try {
-      setSession(await webLensService.readySiteCloneBrowserSession(siteCloneId))
-    } catch (requestError) {
-      if (sessionUnavailable(requestError)) clearSession()
-      setError(message(requestError, 'Không thể xác nhận đăng nhập.'))
-    } finally {
-      setBusy(false)
-    }
+    await changeSession(() => webLensService.readySiteCloneBrowserSession(siteCloneId), 'Không thể xác nhận đăng nhập.')
   }
 
   async function close() {
-    setBusy(true)
-    try {
+    await changeSession(async () => {
       await webLensService.closeSiteCloneBrowserSession(siteCloneId)
-      clearSession()
-      setError(null)
-    } catch (requestError) {
-      setError(message(requestError, 'Không thể đóng phiên trình duyệt.'))
-    } finally {
-      setBusy(false)
-    }
+      return null
+    }, 'Không thể đóng phiên trình duyệt.')
   }
 
   if (!session) {

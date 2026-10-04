@@ -1,25 +1,24 @@
-import { isIP } from 'node:net'
+import { BlockList, isIP } from 'node:net'
 import { lookup } from 'node:dns/promises'
 
+const blockedAddresses = new BlockList()
+for (const [address, prefix] of [
+  ['0.0.0.0', 8], ['10.0.0.0', 8], ['100.64.0.0', 10], ['127.0.0.0', 8],
+  ['169.254.0.0', 16], ['172.16.0.0', 12], ['192.0.0.0', 24],
+  ['192.0.2.0', 24], ['192.168.0.0', 16], ['198.18.0.0', 15],
+  ['198.51.100.0', 24], ['203.0.113.0', 24], ['224.0.0.0', 4], ['240.0.0.0', 4],
+] as const) blockedAddresses.addSubnet(address, prefix, 'ipv4')
+for (const [address, prefix] of [
+  ['::', 128], ['::1', 128], ['fc00::', 7], ['fe80::', 10],
+  ['ff00::', 8], ['2001:db8::', 32],
+] as const) blockedAddresses.addSubnet(address, prefix, 'ipv6')
+
 export function isPrivateAddress(address: string): boolean {
-  const normalized = address.toLowerCase().split('%')[0] ?? address.toLowerCase()
-  if (isIP(normalized) === 4) {
-    const parts = normalized.split('.').map(Number)
-    const first = parts[0] ?? -1
-    const second = parts[1] ?? -1
-    return first === 0 || first === 10 || first === 127 || first >= 224
-      || (first === 169 && second === 254)
-      || (first === 172 && second >= 16 && second <= 31)
-      || (first === 192 && second === 168)
-      || (first === 100 && second >= 64 && second <= 127)
-  }
-  if (isIP(normalized) === 6) {
-    return normalized === '::' || normalized === '::1' || normalized.startsWith('fc')
-      || normalized.startsWith('fd') || normalized.startsWith('fe8')
-      || normalized.startsWith('fe9') || normalized.startsWith('fea')
-      || normalized.startsWith('feb') || normalized.startsWith('ff')
-  }
-  return true
+  const normalized = address.toLowerCase().split('%')[0] ?? ''
+  const family = isIP(normalized)
+  if (!family) return true
+  // Node's BlockList also matches IPv4-mapped IPv6 against IPv4 subnets.
+  return blockedAddresses.check(normalized, family === 4 ? 'ipv4' : 'ipv6')
 }
 
 export async function assertPublicHttpUrl(rawUrl: string): Promise<URL> {
@@ -36,7 +35,8 @@ export async function assertPublicHttpUrl(rawUrl: string): Promise<URL> {
 }
 
 export async function resolvePublicAddresses(hostname: string): Promise<string[]> {
-  const normalized = hostname.toLowerCase()
+  const lower = hostname.toLowerCase()
+  const normalized = lower.startsWith('[') && lower.endsWith(']') ? lower.slice(1, -1) : lower
   const direct = isIP(normalized)
   const addresses = direct ? [normalized] : await lookup(normalized, { all: true })
     .then((results) => results.map(({ address }) => address))

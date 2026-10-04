@@ -16,6 +16,8 @@ import com.weblens.auth.security.TokenPair;
 import com.weblens.common.exception.ApiException;
 import com.weblens.common.exception.ConflictException;
 import com.weblens.common.exception.UnauthorizedException;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.nio.charset.StandardCharsets;
 import java.time.Clock;
 import java.time.Instant;
@@ -24,7 +26,10 @@ import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.security.oauth2.jwt.Jwt;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 
 @Service
 @Transactional(readOnly = true)
@@ -39,6 +44,11 @@ public class AuthenticationService {
     private final TokenHashingService hashes;
     private final RandomTokenService randomTokens;
     private final Clock clock;
+    private final TransactionTemplate loginRead;
+    private final TransactionTemplate loginWrite;
+    private final Timer loginReadTime;
+    private final Timer passwordTime;
+    private final Timer sessionTime;
 
     public AuthenticationService(
             UserRepository users,
@@ -47,7 +57,9 @@ public class AuthenticationService {
             JwtTokenService jwtTokens,
             TokenHashingService hashes,
             RandomTokenService randomTokens,
-            Clock clock
+            Clock clock,
+            PlatformTransactionManager transactionManager,
+            MeterRegistry metrics
     ) {
         this.users = users;
         this.sessions = sessions;
@@ -56,23 +68,33 @@ public class AuthenticationService {
         this.hashes = hashes;
         this.randomTokens = randomTokens;
         this.clock = clock;
+        this.loginRead = new TransactionTemplate(transactionManager);
+        this.loginRead.setReadOnly(true);
+        this.loginWrite = new TransactionTemplate(transactionManager);
+        this.loginReadTime = metrics.timer("weblens.auth.login.stage", "stage", "lookup");
+        this.passwordTime = metrics.timer("weblens.auth.login.stage", "stage", "password");
+        this.sessionTime = metrics.timer("weblens.auth.login.stage", "stage", "session");
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.NEVER)
     public IssuedAuthentication register(RegisterRequest request) {
         requireBcryptCompatible(request.password(), false);
         EmailAddress email = EmailAddress.of(request.email());
-        if (users.existsByNormalizedEmail(email.value())) {
+        if (Boolean.TRUE.equals(loginRead.execute(status -> users.existsByNormalizedEmail(email.value())))) {
             throw emailConflict();
         }
+        String encodedPassword = passwords.encode(request.password());
+        return loginWrite.execute(status -> registerUser(request, email, encodedPassword));
+    }
 
+    private IssuedAuthentication registerUser(RegisterRequest request, EmailAddress email, String encodedPassword) {
         Instant now = clock.instant();
         UserEntity user = new UserEntity(
                 UUID.randomUUID(),
                 email.value(),
                 email.value(),
                 request.displayName().strip(),
-                passwords.encode(request.password()),
+                encodedPassword,
                 UserStatus.ACTIVE,
                 now,
                 now
@@ -85,16 +107,38 @@ public class AuthenticationService {
         return createSession(user, now);
     }
 
-    @Transactional
+    @Transactional(propagation = Propagation.NEVER)
     public IssuedAuthentication login(LoginRequest request) {
         requireBcryptCompatible(request.password(), true);
         EmailAddress email = EmailAddress.of(request.email());
-        UserEntity user = users.findByNormalizedEmail(email.value())
-                .orElseThrow(this::invalidCredentials);
-        if (user.getStatus() != UserStatus.ACTIVE || !passwords.matches(request.password(), user.getPasswordHash())) {
+        LoginCredential credential = loginReadTime.record(() -> loginRead.execute(status -> {
+            UserEntity user = users.findByNormalizedEmail(email.value()).orElseThrow(this::invalidCredentials);
+            if (user.getStatus() != UserStatus.ACTIVE) {
+                throw invalidCredentials();
+            }
+            return new LoginCredential(user.getId(), user.getPasswordHash(), user.getVersion());
+        }));
+        if (!passwordTime.record(() -> passwords.matches(request.password(), credential.passwordHash()))) {
             throw invalidCredentials();
         }
-        return createSession(user, clock.instant());
+        // Re-read under the existing user lock: credentials may change while bcrypt runs.
+        return sessionTime.record(() -> loginWrite.execute(status -> {
+            UserEntity user = users.findByIdForUpdate(credential.id()).orElseThrow(this::invalidCredentials);
+            if (user.getStatus() != UserStatus.ACTIVE
+                    || user.getVersion() != credential.version()
+                    || !user.getPasswordHash().equals(credential.passwordHash())
+                    || !user.getNormalizedEmail().equals(email.value())) {
+                throw invalidCredentials();
+            }
+            return createSession(user, clock.instant());
+        }));
+    }
+
+    private record LoginCredential(UUID id, String passwordHash, long version) {
+        @Override
+        public String toString() {
+            return "LoginCredential[redacted]";
+        }
     }
 
     @Transactional

@@ -10,6 +10,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   backend:
     runs-on: ubuntu-latest
@@ -112,6 +116,9 @@ jobs:
     needs: [backend, crawler, capture-worker, frontend]
     runs-on: windows-latest
     timeout-minutes: 45
+    environment:
+      name: production
+      url: ${{ vars.WEBLENS_PUBLIC_URL }}
     permissions:
       contents: write
     steps:
@@ -177,9 +184,6 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     timeout-minutes: 45
-    environment:
-      name: production
-      url: ${{ vars.WEBLENS_PUBLIC_URL }}
     concurrency:
       group: production
       cancel-in-progress: true

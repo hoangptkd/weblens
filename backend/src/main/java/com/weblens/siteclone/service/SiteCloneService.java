@@ -122,6 +122,7 @@ public class SiteCloneService {
         return new CreateResult(toResponse(siteClone), false);
     }
 
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
     public SiteCloneResponse get(UUID ownerId, UUID siteCloneId) {
         currentUsers.requireActive(ownerId);
         SiteCloneRequestEntity local = siteClones.findByIdAndOwnerId(siteCloneId, ownerId)
@@ -224,6 +225,7 @@ public class SiteCloneService {
         return SiteCloneProgressResponse.pending(siteCloneId, local.getScanId(), local.getStatus().name(), clock.instant());
     }
 
+    @Transactional(propagation = org.springframework.transaction.annotation.Propagation.NOT_SUPPORTED)
     public CaptureArtifactContent getArtifact(UUID ownerId, UUID siteCloneId, UUID artifactId) {
         currentUsers.requireActive(ownerId);
         siteClones.findByIdAndOwnerId(siteCloneId, ownerId).orElseThrow(SiteCloneService::notFound);

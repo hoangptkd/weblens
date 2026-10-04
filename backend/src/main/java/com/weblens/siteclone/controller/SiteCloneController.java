@@ -202,20 +202,21 @@ public class SiteCloneController {
 
     @GetMapping("/{siteCloneId}/artifacts/{artifactId}")
     @Operation(summary = "Download one owner-authorized full-site clone artifact")
-    ResponseEntity<byte[]> getArtifact(
+    ResponseEntity<org.springframework.core.io.Resource> getArtifact(
             @AuthenticationPrincipal Jwt jwt,
             @PathVariable UUID siteCloneId,
-            @PathVariable UUID artifactId
+            @PathVariable UUID artifactId,
+            jakarta.servlet.http.HttpServletRequest request
     ) {
         CaptureArtifactContent artifact = siteClones.getArtifact(
                 AuthenticatedUserId.from(jwt), siteCloneId, artifactId
         );
-        byte[] bytes = artifact.bytes();
+        request.setAttribute(com.weblens.capture.controller.ArtifactDownloadFilter.ARTIFACT, artifact);
         String filename = MediaType.APPLICATION_JSON_VALUE.equals(artifact.contentType())
                 ? "manifest.json" : archiveFilename(artifact.filename());
         ResponseEntity.BodyBuilder response = ResponseEntity.ok()
                 .contentType(MediaType.parseMediaType(artifact.contentType()))
-                .contentLength(bytes.length)
+                .contentLength(artifact.contentLength())
                 .cacheControl(CacheControl.noStore())
                 .header(HttpHeaders.CONTENT_DISPOSITION,
                         ContentDisposition.attachment().filename(filename).build().toString())
@@ -223,7 +224,7 @@ public class SiteCloneController {
         if (artifact.etag() != null && !artifact.etag().isBlank()) {
             response.eTag(artifact.etag());
         }
-        return response.body(bytes);
+        return response.body(artifact.resource());
     }
 
     private static String archiveFilename(String filename) {

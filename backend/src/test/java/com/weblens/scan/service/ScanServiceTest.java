@@ -157,10 +157,29 @@ class ScanServiceTest {
 		ScanService.CancelScanResult result = service.cancel(userId, scanId, UUID.randomUUID());
 
 		assertThat(result.newlyAccepted()).isTrue();
-		assertThat(result.response().status()).hasToString("CANCELLED");
+		assertThat(result.response().status()).hasToString("CANCEL_REQUESTED");
 		ArgumentCaptor<MessageEnvelope<?>> envelope = ArgumentCaptor.forClass(MessageEnvelope.class);
 		verify(messages).enqueue(envelope.capture());
 		assertThat(envelope.getValue().messageType()).isEqualTo("SCAN_CANCEL_REQUESTED");
+        assertThat(service.cancel(userId, scanId, UUID.randomUUID()).newlyAccepted()).isFalse();
+        verify(messages).enqueue(org.mockito.ArgumentMatchers.any());
+    }
+
+    @Test
+    void cloneCancellationAlsoWaitsForCrawlerAndQueuesOnlyOneCommand() {
+        UUID ownerId = UUID.randomUUID();
+        ScanEntity scan = new ScanEntity(UUID.randomUUID(), UUID.randomUUID(), ownerId,
+                new ScanConfiguration(25, 3, 10_485_760, 120, 5, 3),
+                "crawler-v1", null, null, NOW.minusSeconds(10));
+        given(scans.findByIdAndRequestedByUserIdForUpdate(scan.getId(), ownerId)).willReturn(Optional.of(scan));
+        given(scans.saveAndFlush(scan)).willReturn(scan);
+
+        service.cancelForSiteClone(ownerId, scan.getId(), UUID.randomUUID());
+        service.cancelForSiteClone(ownerId, scan.getId(), UUID.randomUUID());
+
+        assertThat(scan.getStatus()).isEqualTo(com.weblens.scan.model.ScanStatus.CANCEL_REQUESTED);
+        assertThat(scan.getFinishedAt()).isNull();
+        verify(messages).enqueue(org.mockito.ArgumentMatchers.any());
     }
 
     @Test

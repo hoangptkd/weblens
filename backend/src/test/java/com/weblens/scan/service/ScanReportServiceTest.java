@@ -2,6 +2,8 @@ package com.weblens.scan.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.BDDMockito.given;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.weblens.auth.service.CurrentUserService;
@@ -25,6 +27,17 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import com.weblens.support.BoundaryTransactionManager;
+import com.weblens.common.exception.NotFoundException;
+import com.weblens.common.exception.UnauthorizedException;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import org.springframework.aop.framework.ProxyFactory;
+import org.springframework.transaction.annotation.AnnotationTransactionAttributeSource;
+import org.springframework.transaction.interceptor.TransactionInterceptor;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.IllegalTransactionStateException;
+import org.springframework.web.client.ResourceAccessException;
 
 @ExtendWith(MockitoExtension.class)
 class ScanReportServiceTest {
@@ -37,10 +50,61 @@ class ScanReportServiceTest {
     private CrawlerReportClient crawler;
 
     private ScanReportService service;
+    private BoundaryTransactionManager transactions;
 
     @BeforeEach
     void setUp() {
-        service = new ScanReportService(scans, currentUsers, crawler, new ObjectMapper());
+        transactions = new BoundaryTransactionManager();
+        var target = new ScanReportService(scans, currentUsers, crawler, new ObjectMapper(),
+                transactions, new SimpleMeterRegistry());
+        var proxy = new ProxyFactory(target);
+        proxy.addAdvice(new TransactionInterceptor(transactions, new AnnotationTransactionAttributeSource()));
+        service = (ScanReportService) proxy.getProxy();
+    }
+
+    @Test
+    void unauthorizedScanNeverCallsCrawler() {
+        var userId = UUID.randomUUID();
+        var scanId = UUID.randomUUID();
+        given(scans.findByIdAndRequestedByUserId(scanId, userId)).willReturn(Optional.empty());
+        assertThatThrownBy(() -> service.listPages(userId, scanId, 100, null, filter()))
+                .isInstanceOf(NotFoundException.class);
+        verifyNoInteractions(crawler);
+    }
+
+    @Test
+    void disabledUserNeverCallsCrawler() {
+        var userId = UUID.randomUUID();
+        org.mockito.BDDMockito.willThrow(new UnauthorizedException("INVALID_USER", "Unavailable"))
+                .given(currentUsers).requireActive(userId);
+        assertThatThrownBy(() -> service.getPage(userId, UUID.randomUUID()))
+                .isInstanceOf(UnauthorizedException.class);
+        verifyNoInteractions(crawler);
+    }
+
+    @Test
+    void remoteFailureOccursAfterAuthorizationCommitAndPreservesCause() {
+        var userId = UUID.randomUUID();
+        var pageId = UUID.randomUUID();
+        var failure = new ResourceAccessException("Test transport failure");
+        given(crawler.getPage(userId, pageId)).willAnswer(invocation -> {
+            assertThat(transactions.commits).isEqualTo(1);
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            throw failure;
+        });
+        assertThatThrownBy(() -> service.getPage(userId, pageId)).hasCause(failure);
+    }
+
+    @Test
+    void callerCannotHoldAnAmbientTransactionDuringRemoteReport() {
+        assertThatThrownBy(() -> new TransactionTemplate(transactions).execute(
+                status -> service.getPage(UUID.randomUUID(), UUID.randomUUID())))
+                .isInstanceOf(IllegalTransactionStateException.class);
+        verifyNoInteractions(crawler, currentUsers);
+    }
+
+    private ScanPageFilter filter() {
+        return new ScanPageFilter(false, List.of(), null, null, null, null, List.of(), List.of(), List.of());
     }
 
     @Test
@@ -55,7 +119,10 @@ class ScanReportServiceTest {
                 "crawler-v1", null, null, observedAt.minusSeconds(10)
         )));
         ScanPageFilter filter = new ScanPageFilter(false, List.of(), null, null, null, null, List.of(), List.of(), List.of());
-        given(crawler.listPages(ownerId, scanId, 100, null, filter)).willReturn(new CrawlerScanPagesContract(
+        given(crawler.listPages(ownerId, scanId, 100, null, filter)).willAnswer(invocation -> {
+            assertThat(TransactionSynchronizationManager.isActualTransactionActive()).isFalse();
+            assertThat(transactions.commits).isEqualTo(1);
+            return new CrawlerScanPagesContract(
                 new CrawlerReportStateContract(scanId, ownerId, "COMPLETED", 1, 1, observedAt),
                 new CrawlerScanSummaryContract(245, 17, 23, 220, 5, 10, 3, 7),
                 List.of(new CrawlerPageContract(
@@ -66,7 +133,8 @@ class ScanReportServiceTest {
                                 Map.of("length", 4)
                         )), observedAt
                 ))
-        ));
+            );
+        });
 
         var response = service.listPages(ownerId, scanId, 100, null, filter);
 

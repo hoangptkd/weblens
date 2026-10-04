@@ -60,6 +60,7 @@ func NewServer(store commandStore, reports reportReader, serviceToken string, lo
 }
 
 func (s *Server) listPages(response http.ResponseWriter, request *http.Request) {
+	requestStarted := time.Now()
 	ownerID, err := uuid.Parse(request.URL.Query().Get("ownerId"))
 	if err != nil {
 		writeProblem(response, request, http.StatusBadRequest, "INVALID_OWNER_ID", "ownerId must be a UUID.")
@@ -70,8 +71,12 @@ func (s *Server) listPages(response http.ResponseWriter, request *http.Request) 
 		writeProblem(response, request, http.StatusBadRequest, "INVALID_SCAN_ID", "scanId must be a UUID.")
 		return
 	}
+	stageStarted := time.Now()
 	state, err := s.store.GetReportState(request.Context(), ownerID, scanID)
+	stateReadDuration := time.Since(stageStarted)
 	if errors.Is(err, postgres.ErrReportNotFound) {
+		s.logger.Info("scan page report not found", "scanId", scanID,
+			"state_read_ms", float64(stateReadDuration)/float64(time.Millisecond))
 		writeProblem(response, request, http.StatusNotFound, "REPORT_NOT_FOUND", "The scan report does not exist.")
 		return
 	}
@@ -95,13 +100,25 @@ func (s *Server) listPages(response http.ResponseWriter, request *http.Request) 
 		writeProblem(response, request, http.StatusBadRequest, "INVALID_PAGE_CURSOR", "cursor does not match the active filters")
 		return
 	}
+	// Only the crawler's authoritative state can prove that no analytics exist.
+	// Validate ownership, filters and cursor before taking this shortcut.
+	if state.AnalyticsExpectedCount == 0 && state.AnalyticsPublishedCount == 0 {
+		writeJSON(response, http.StatusOK, model.ScanPagesReport{
+			State: state, Items: []model.ReportPage{},
+		})
+		return
+	}
+	stageStarted = time.Now()
 	pages, hasMore, err := s.reports.ListPages(request.Context(), ownerID, scanID, limit, cursor.URL, cursor.ID, filters)
+	pageListDuration := time.Since(stageStarted)
 	if err != nil {
 		s.logger.Error("read page report failed", "scanId", scanID, "error", err)
 		writeProblem(response, request, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The scan report is temporarily unavailable.")
 		return
 	}
+	stageStarted = time.Now()
 	summary, err := s.reports.ScanSummary(request.Context(), ownerID, scanID)
+	summaryDuration := time.Since(stageStarted)
 	if err != nil {
 		s.logger.Error("read scan report summary failed", "scanId", scanID, "error", err)
 		writeProblem(response, request, http.StatusServiceUnavailable, "REPORT_UNAVAILABLE", "The scan report summary is temporarily unavailable.")
@@ -111,6 +128,17 @@ func (s *Server) listPages(response http.ResponseWriter, request *http.Request) 
 	if hasMore && len(pages) > 0 {
 		last := pages[len(pages)-1]
 		nextCursor = encodePageCursor(pageCursor{URL: last.URL, ID: last.ID, Filter: fingerprint})
+	}
+	preWriteDuration := time.Since(requestStarted)
+	if preWriteDuration >= 250*time.Millisecond {
+		s.logger.Info("slow scan page report",
+			"scanId", scanID,
+			"state_read_ms", float64(stateReadDuration)/float64(time.Millisecond),
+			"page_list_ms", float64(pageListDuration)/float64(time.Millisecond),
+			"summary_ms", float64(summaryDuration)/float64(time.Millisecond),
+			"page_count", len(pages),
+			"pre_write_ms", float64(preWriteDuration)/float64(time.Millisecond),
+		)
 	}
 	writeJSON(response, http.StatusOK, model.ScanPagesReport{State: state, Summary: summary, Items: pages, NextCursor: nextCursor})
 }

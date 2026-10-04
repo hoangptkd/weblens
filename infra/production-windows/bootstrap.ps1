@@ -35,6 +35,10 @@ if (-not (Test-Path -LiteralPath $winsw)) {
 }
 
 $serviceNames = 'WebLensBackend', 'WebLensCrawler', 'WebLensCapture', 'WebLensCaddy'
+$databaseClients = 'WebLensBackend', 'WebLensCrawler', 'WebLensCapture'
+if (-not (Get-Service -Name 'WebLensPostgres' -ErrorAction SilentlyContinue)) {
+    throw 'WebLensPostgres must be installed before the application services.'
+}
 foreach ($serviceName in $serviceNames) {
     $wrapper = Join-Path $services "$serviceName.exe"
     Copy-Item -LiteralPath $winsw -Destination $wrapper -Force
@@ -45,6 +49,11 @@ foreach ($serviceName in $serviceNames) {
     }
     & sc.exe config $serviceName obj= "NT SERVICE\$serviceName"
     if ($LASTEXITCODE -ne 0) { throw "Could not assign virtual account to $serviceName" }
+}
+
+foreach ($serviceName in $databaseClients) {
+    & sc.exe config $serviceName depend= WebLensPostgres
+    if ($LASTEXITCODE -ne 0) { throw "Could not add the PostgreSQL dependency to $serviceName" }
 }
 
 & icacls.exe $programData '/inheritance:r' '/grant:r' 'SYSTEM:(OI)(CI)F' 'BUILTIN\Administrators:(OI)(CI)F'

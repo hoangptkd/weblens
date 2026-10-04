@@ -6,9 +6,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $repository = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
-$staging = Join-Path ([IO.Path]::GetTempPath()) "weblens-$Commit"
+$staging = Join-Path ([IO.Path]::GetTempPath()) "weblens-$Commit-$([guid]::NewGuid().ToString('N'))"
 $output = [IO.Path]::GetFullPath($OutputDirectory)
-if (Test-Path -LiteralPath $staging) { Remove-Item -LiteralPath $staging -Recurse -Force }
 New-Item -ItemType Directory -Force -Path $staging, $output, (Join-Path $staging 'backend'), (Join-Path $staging 'crawler'), (Join-Path $staging 'capture-worker'), (Join-Path $staging 'frontend'), (Join-Path $staging 'infra\production-windows') | Out-Null
 
 Copy-Item -LiteralPath (Get-ChildItem -LiteralPath (Join-Path $repository 'backend\target') -Filter '*.jar' | Where-Object Name -NotMatch '\.original$' | Select-Object -First 1).FullName -Destination (Join-Path $staging 'backend\weblens-backend.jar')
@@ -55,7 +54,6 @@ $runtime = @{
     camoufoxExeSha256 = (Get-FileHash -Algorithm SHA256 -LiteralPath (Join-Path $camoufoxDestination 'camoufox.exe')).Hash.ToLowerInvariant()
 }
 $runtime | ConvertTo-Json -Compress | Set-Content -LiteralPath (Join-Path $staging 'capture-worker\runtime.json') -Encoding ascii
-Remove-Item -LiteralPath (Join-Path $staging 'capture-worker\node_modules'), $camoufoxDestination -Recurse -Force
 $loopbackApi = Get-ChildItem -LiteralPath (Join-Path $repository 'frontend\dist\assets') -Filter '*.js' |
     Select-String -SimpleMatch 'http://localhost:8080', 'http://127.0.0.1:8080' |
     Select-Object -First 1

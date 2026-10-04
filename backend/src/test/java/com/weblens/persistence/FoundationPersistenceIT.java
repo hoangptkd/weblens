@@ -205,6 +205,7 @@ class FoundationPersistenceIT {
     private ScanEntity completedScan(UUID ownerId, UUID websiteId, Instant createdAt) {
         ScanEntity scan = scan(ownerId, websiteId, createdAt);
         scan.requestCancellation(createdAt.plusMillis(1));
+        scan.transitionTo(com.weblens.scan.model.ScanStatus.CANCELLED, createdAt.plusMillis(2));
         return scan;
     }
 

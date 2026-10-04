@@ -27,6 +27,8 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
 import java.util.EnumSet;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import jakarta.persistence.criteria.Predicate;
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.PageRequest;
@@ -34,10 +36,16 @@ import org.springframework.data.domain.Sort;
 import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 @Service
 @Transactional(readOnly = true)
 public class ScanService {
+
+    private static final Logger ADMISSION_TIMING = LoggerFactory.getLogger("com.weblens.scan.admission");
 
     private static final int MAX_PAGE_SIZE = 100;
     private static final int MAX_ACTIVE_SCANS_PER_USER = 3;
@@ -80,66 +88,145 @@ public class ScanService {
             String rawIdempotencyKey,
             UUID correlationId
     ) {
-        currentUsers.lockActive(userId);
-        WebsiteAccessService.WebsiteTargetSnapshot website = websiteAccess.lockOwnedActive(userId, websiteId);
-        requirePublicTarget(website.hostname());
+        AdmissionTiming timing = AdmissionTiming.start(correlationId);
+        try {
+            if (timing != null) timing.stage("user_lock");
+            currentUsers.lockActive(userId);
+            if (timing != null) timing.stage("website_lock");
+            WebsiteAccessService.WebsiteTargetSnapshot website = websiteAccess.lockOwnedActive(userId, websiteId);
+            if (timing != null) timing.stage("target_and_key_validation");
+            requirePublicTarget(website.hostname());
 
-        String keyHash = idempotencyKeys.hashOptional(rawIdempotencyKey);
-        String fingerprint = keyHash == null
-                ? null
-                : idempotencyKeys.fingerprint(CREATE_OPERATION, websiteId.toString());
-        if (keyHash != null) {
-            ScanEntity existing = scans.findByRequestedByUserIdAndIdempotencyKeyHash(userId, keyHash).orElse(null);
-            if (existing != null) {
-                return replay(existing, fingerprint);
+            String keyHash = idempotencyKeys.hashOptional(rawIdempotencyKey);
+            String fingerprint = keyHash == null
+                    ? null
+                    : idempotencyKeys.fingerprint(CREATE_OPERATION, websiteId.toString());
+            if (keyHash != null) {
+                if (timing != null) timing.stage("idempotency_lookup");
+                ScanEntity existing = scans.findByRequestedByUserIdAndIdempotencyKeyHash(userId, keyHash).orElse(null);
+                if (existing != null) {
+                    CreateScanResult result = replay(existing, fingerprint);
+                    if (timing != null) timing.success("REPLAY", result.response().id());
+                    return result;
+                }
+            }
+
+            if (timing != null) timing.stage("website_active_check");
+            if (scans.existsByWebsiteIdAndRequestedByUserIdAndStatusIn(
+                    websiteId, userId, ACTIVE_STATUSES
+            )) {
+                throw new ConflictException(
+                        "WEBSITE_SCAN_ALREADY_ACTIVE",
+                        "The website already has an active scan."
+                );
+            }
+            if (timing != null) timing.stage("user_quota_check");
+            if (scans.countByRequestedByUserIdAndStatusIn(userId, ACTIVE_STATUSES)
+                    >= MAX_ACTIVE_SCANS_PER_USER) {
+                throw new ConflictException(
+                        "ACTIVE_SCAN_QUOTA_EXCEEDED",
+                        "A user can run at most three scans at the same time."
+                );
+            }
+
+            if (timing != null) timing.stage("scan_entity");
+            Instant now = clock.instant();
+            ScanEntity scan = new ScanEntity(
+                    UUID.randomUUID(),
+                    websiteId,
+                    userId,
+                    configuration(),
+                    COLLECTOR_VERSION,
+                    keyHash,
+                    fingerprint,
+                    now
+            );
+            if (timing != null) timing.stage("save_and_flush");
+            scans.saveAndFlush(scan);
+            if (timing != null) timing.stage("outbox_enqueue");
+            messages.enqueue(new MessageEnvelope<>(
+                    UUID.randomUUID(),
+                    "SCAN",
+                    scan.getId(),
+                    scan.getVersion(),
+                    "SCAN_REQUESTED",
+                    1,
+                    correlationId,
+                    now,
+                    new ScanRequestedPayload(
+                            scan.getId(), userId, website.websiteId(), website.canonicalUrl(), website.hostname(),
+                            scan.getMaxPages(), scan.getMaxDepth(), scan.getMaxResponseBytes(),
+                            scan.getMaxDurationSeconds(), scan.getMaxRedirects(), scan.getConcurrency(),
+                            scan.getCollectorVersion()
+                    )
+            ));
+            if (timing != null) timing.stage("response_mapping");
+            CreateScanResult result = new CreateScanResult(toResponse(scan), false);
+            if (timing != null) timing.success("NEW_SCAN", scan.getId());
+            return result;
+        } finally {
+            if (timing != null) timing.endBody();
+        }
+    }
+
+    // Diagnostic only: enable the dedicated logger for a bounded probe, never SQL binds or credentials.
+    static final class AdmissionTiming {
+        private final UUID correlationId;
+        private final long started = System.nanoTime();
+        private final Map<String, Double> stages = new LinkedHashMap<>();
+        private final boolean synchronizedTransaction;
+        private long last = started;
+        private long bodyEnded;
+        private String stage = "body_entry";
+        private String outcome = "FAILED";
+        private UUID scanId;
+
+        static AdmissionTiming start(UUID correlationId) {
+            return ADMISSION_TIMING.isDebugEnabled() ? new AdmissionTiming(correlationId) : null;
+        }
+
+        private AdmissionTiming(UUID correlationId) {
+            this.correlationId = correlationId;
+            synchronizedTransaction = TransactionSynchronizationManager.isActualTransactionActive()
+                    && TransactionSynchronizationManager.isSynchronizationActive();
+            if (synchronizedTransaction) {
+                TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                        log(switch (status) {
+                            case STATUS_COMMITTED -> "COMMITTED";
+                            case STATUS_ROLLED_BACK -> "ROLLED_BACK";
+                            default -> "UNKNOWN";
+                        });
+                    }
+                });
             }
         }
 
-        if (scans.existsByWebsiteIdAndRequestedByUserIdAndStatusIn(
-                websiteId, userId, ACTIVE_STATUSES
-        )) {
-            throw new ConflictException(
-                    "WEBSITE_SCAN_ALREADY_ACTIVE",
-                    "The website already has an active scan."
-            );
-        }
-        if (scans.countByRequestedByUserIdAndStatusIn(userId, ACTIVE_STATUSES)
-                >= MAX_ACTIVE_SCANS_PER_USER) {
-            throw new ConflictException(
-                    "ACTIVE_SCAN_QUOTA_EXCEEDED",
-                    "A user can run at most three scans at the same time."
-            );
+        void stage(String next) {
+            long now = System.nanoTime();
+            stages.put(stage, (now - last) / 1_000_000.0);
+            stage = next;
+            last = now;
         }
 
-        Instant now = clock.instant();
-        ScanEntity scan = new ScanEntity(
-                UUID.randomUUID(),
-                websiteId,
-                userId,
-                configuration(),
-                COLLECTOR_VERSION,
-                keyHash,
-                fingerprint,
-                now
-        );
-        scans.saveAndFlush(scan);
-		messages.enqueue(new MessageEnvelope<>(
-				UUID.randomUUID(),
-				"SCAN",
-				scan.getId(),
-				scan.getVersion(),
-				"SCAN_REQUESTED",
-				1,
-				correlationId,
-				now,
-				new ScanRequestedPayload(
-						scan.getId(), userId, website.websiteId(), website.canonicalUrl(), website.hostname(),
-						scan.getMaxPages(), scan.getMaxDepth(), scan.getMaxResponseBytes(),
-						scan.getMaxDurationSeconds(), scan.getMaxRedirects(), scan.getConcurrency(),
-						scan.getCollectorVersion()
-				)
-		));
-        return new CreateScanResult(toResponse(scan), false);
+        void success(String result, UUID id) {
+            outcome = result;
+            scanId = id;
+        }
+
+        void endBody() {
+            stage("after_body");
+            bodyEnded = last;
+            if (!synchronizedTransaction) log("NOT_OBSERVED");
+        }
+
+        private void log(String transactionStatus) {
+            ADMISSION_TIMING.debug(
+                    "scan_admission_timing correlationId={} scanId={} outcome={} transactionStatus={} bodyMs={} completionAfterBodyMs={} stagesMs={}",
+                    correlationId, scanId, outcome, transactionStatus,
+                    (bodyEnded - started) / 1_000_000.0, (System.nanoTime() - bodyEnded) / 1_000_000.0, stages);
+        }
     }
 
     public PageResponse<ScanResponse> list(

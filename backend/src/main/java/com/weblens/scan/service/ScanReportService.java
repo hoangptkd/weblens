@@ -19,41 +19,53 @@ import com.weblens.scan.dto.ScanPageFilter;
 import com.weblens.scan.dto.ScanReportSummaryResponse;
 import com.weblens.scan.dto.StructuredDataSummaryResponse;
 import com.weblens.scan.repository.ScanRepository;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import java.net.URI;
 import java.util.List;
 import java.util.Locale;
 import java.util.UUID;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.PlatformTransactionManager;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionTemplate;
 import org.springframework.web.client.HttpClientErrorException;
 import org.springframework.web.client.RestClientException;
 
 @Service
-@Transactional(readOnly = true)
+@Transactional(propagation = Propagation.NEVER)
 public class ScanReportService {
 
     private final ScanRepository scans;
     private final CurrentUserService currentUsers;
     private final CrawlerReportClient crawler;
     private final ObjectMapper objectMapper;
+    private final TransactionTemplate authorization;
+    private final Timer authorizationTime;
+    private final Timer remoteTime;
 
     public ScanReportService(
             ScanRepository scans,
             CurrentUserService currentUsers,
             CrawlerReportClient crawler,
-            ObjectMapper objectMapper
+            ObjectMapper objectMapper,
+            PlatformTransactionManager transactionManager,
+            MeterRegistry metrics
     ) {
         this.scans = scans;
         this.currentUsers = currentUsers;
         this.crawler = crawler;
         this.objectMapper = objectMapper;
+        this.authorization = new TransactionTemplate(transactionManager);
+        this.authorization.setReadOnly(true);
+        this.authorizationTime = metrics.timer("weblens.scan.report.stage", "stage", "authorization");
+        this.remoteTime = metrics.timer("weblens.scan.report.stage", "stage", "remote");
     }
 
     public ScanPagesResponse listPages(UUID userId, UUID scanId, int limit, String cursor, ScanPageFilter filter) {
-        currentUsers.requireActive(userId);
-        scans.findByIdAndRequestedByUserId(scanId, userId)
-                .orElseThrow(ScanReportService::notFound);
+        authorize(userId, scanId);
         if (filter.statusMin() != null && filter.statusMax() != null
                 && filter.statusMin() > filter.statusMax()) {
             throw new ApiException(
@@ -64,7 +76,7 @@ public class ScanReportService {
             );
         }
         try {
-            CrawlerScanPagesContract report = crawler.listPages(userId, scanId, limit, cursor, filter);
+            CrawlerScanPagesContract report = remoteTime.record(() -> crawler.listPages(userId, scanId, limit, cursor, filter));
             if (report == null || report.state() == null || report.summary() == null || report.items() == null) {
                 throw unavailable(null);
             }
@@ -95,9 +107,9 @@ public class ScanReportService {
     }
 
     public ScanPageResponse getPage(UUID userId, UUID pageId) {
-        currentUsers.requireActive(userId);
+        authorize(userId, null);
         try {
-            CrawlerPageContract page = crawler.getPage(userId, pageId);
+            CrawlerPageContract page = remoteTime.record(() -> crawler.getPage(userId, pageId));
             if (page == null) {
                 throw unavailable(null);
             }
@@ -107,6 +119,15 @@ public class ScanReportService {
         } catch (RestClientException exception) {
             throw unavailable(exception);
         }
+    }
+
+    private void authorize(UUID userId, UUID scanId) {
+        authorizationTime.record(() -> authorization.executeWithoutResult(status -> {
+            currentUsers.requireActive(userId);
+            if (scanId != null) {
+                scans.findByIdAndRequestedByUserId(scanId, userId).orElseThrow(ScanReportService::notFound);
+            }
+        }));
     }
 
     private ScanPageResponse toResponse(CrawlerPageContract page) {
